@@ -1,0 +1,70 @@
+# 基础MiniRAG依赖
+lightrag-hku
+
+# 文件解析相关依赖
+# PDF解析
+PyPDF2>=3.0.0
+pdfplumber>=0.10.0
+
+# Office文档解析
+python-docx>=1.1.0
+python-pptx>=0.6.23
+
+# 图片处理和OCR
+Pillow>=10.0.0
+pytesseract>=0.3.10
+
+# Markdown处理
+markdown>=3.5.0
+
+# 文件监控
+watchdog>=3.0.0
+
+# 配置文件处理
+configparser
+
+# 数据处理
+pandas>=2.1.0
+openpyxl>=3.1.0
+
+# Web服务相关
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+aiofiles>=23.2.0
+
+# 其他工具
+pathlib
+asyncio
+threading
+logging
+re
+json
+os
+time
+datetime
+typing
+abc
+
+# 可选：Redis支持
+redis>=5.0.0
+
+# 可选：数据库支持
+psycopg2-binary>=2.9.0
+pymongo>=4.5.0
+
+# 可选：向量数据库支持
+chromadb>=0.4.0
+weaviate-client>=3.24.0
+pymilvus>=2.3.0
+
+# 可选：Neo4j支持
+neo4j>=5.12.0
+
+# 多模态模型相关
+openai
+transformers
+torch
+
+# 系统监控
+psutil

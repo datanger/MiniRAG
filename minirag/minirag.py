@@ -3,13 +3,14 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import partial
-from typing import Type, cast, Any
+from typing import Type, cast, Any, Union, List, Optional
 from dotenv import load_dotenv
 
 
 from .operate import (
     chunking_by_token_size,
     extract_entities,
+    extract_entities_parallel,
     hybrid_query,
     minirag_query,
     naive_query,
@@ -142,6 +143,12 @@ class MiniRAG:
     # entity extraction
     entity_extract_max_gleaning: int = 1
     entity_summary_to_max_tokens: int = 500
+    
+    # parallel optimization
+    enable_parallel_entity_extraction: bool = field(default=bool(os.getenv("ENABLE_PARALLEL_ENTITY_EXTRACTION", "true").lower() == "true"))
+    parallel_entity_extraction_max_concurrent: int = field(default=int(os.getenv("PARALLEL_ENTITY_EXTRACTION_MAX_CONCURRENT", 16)))
+    parallel_entity_extraction_batch_size: int = field(default=int(os.getenv("PARALLEL_ENTITY_EXTRACTION_BATCH_SIZE", 10)))
+    enable_smart_batching: bool = field(default=bool(os.getenv("ENABLE_SMART_BATCHING", "true").lower() == "true"))
 
     # node embedding
     node_embedding_algorithm: str = "node2vec"
@@ -343,22 +350,37 @@ class MiniRAG:
 
     async def ainsert(
         self,
-        input: str | list[str],
-        split_by_character: str | None = None,
+        input: Union[str, List[str]],
+        split_by_character: Optional[str] = None,
         split_by_character_only: bool = False,
-        ids: str | list[str] | None = None,
+        ids: Optional[Union[str, List[str]]] = None,
     ) -> None:
+        import time
+        total_start = time.time()
+        
         if isinstance(input, str):
             input = [input]
         if isinstance(ids, str):
             ids = [ids]
+        
+        logger.info(f"开始插入文档 (数量: {len(input)}, 总长度: {sum(len(doc) for doc in input)} 字符)")
 
+        # 文档入队
+        enqueue_start = time.time()
         await self.apipeline_enqueue_documents(input, ids)
+        enqueue_time = time.time() - enqueue_start
+        logger.info(f"文档入队完成 (耗时: {enqueue_time:.3f}s)")
+
+        # 处理入队文档
+        process_start = time.time()
         await self.apipeline_process_enqueue_documents(
             split_by_character, split_by_character_only
         )
+        process_time = time.time() - process_start
+        logger.info(f"文档处理完成 (耗时: {process_time:.3f}s)")
 
-        # Perform additional entity extraction as per original ainsert logic
+        # 执行实体提取
+        entity_start = time.time()
         inserting_chunks = {
             compute_mdhash_id(dp["content"], prefix="chunk-"): {
                 **dp,
@@ -376,20 +398,51 @@ class MiniRAG:
         }
 
         if inserting_chunks:
-            logger.info("Performing entity extraction on newly processed chunks")
-            await extract_entities(
-                inserting_chunks,
-                knowledge_graph_inst=self.chunk_entity_relation_graph,
-                entity_vdb=self.entities_vdb,
-                entity_name_vdb=self.entity_name_vdb,
-                relationships_vdb=self.relationships_vdb,
-                global_config=asdict(self),
-            )
+            # 根据配置选择使用并行版本还是原始版本
+            if self.enable_parallel_entity_extraction:
+                logger.info(f"开始并行实体提取 (块数: {len(inserting_chunks)}, 并发数: {self.parallel_entity_extraction_max_concurrent})")
+                await extract_entities_parallel(
+                    inserting_chunks,
+                    knowledge_graph_inst=self.chunk_entity_relation_graph,
+                    entity_vdb=self.entities_vdb,
+                    entity_name_vdb=self.entity_name_vdb,
+                    relationships_vdb=self.relationships_vdb,
+                    global_config=asdict(self),
+                    max_concurrent=self.parallel_entity_extraction_max_concurrent,
+                    batch_size=self.parallel_entity_extraction_batch_size,
+                )
+                entity_time = time.time() - entity_start
+                logger.info(f"并行实体提取完成 (耗时: {entity_time:.3f}s)")
+            else:
+                logger.info(f"开始串行实体提取 (块数: {len(inserting_chunks)})")
+                await extract_entities(
+                    inserting_chunks,
+                    knowledge_graph_inst=self.chunk_entity_relation_graph,
+                    entity_vdb=self.entities_vdb,
+                    entity_name_vdb=self.entity_name_vdb,
+                    relationships_vdb=self.relationships_vdb,
+                    global_config=asdict(self),
+                )
+                entity_time = time.time() - entity_start
+                logger.info(f"串行实体提取完成 (耗时: {entity_time:.3f}s)")
+        else:
+            entity_time = 0
+            logger.info("无需实体提取")
  
+        # 完成插入
+        done_start = time.time()
         await self._insert_done()
+        done_time = time.time() - done_start
+        
+        total_time = time.time() - total_start
+        logger.info(f"文档插入完成 (总耗时: {total_time:.3f}s)")
+        logger.info(f"   - 入队: {enqueue_time:.3f}s")
+        logger.info(f"   - 处理: {process_time:.3f}s")
+        logger.info(f"   - 实体提取: {entity_time:.3f}s")
+        logger.info(f"   - 完成: {done_time:.3f}s)")
 
     async def apipeline_enqueue_documents(
-        self, input: str | list[str], ids: list[str] | None = None
+        self, input: Union[str, List[str]], ids: Optional[List[str]] = None
     ) -> None:
         """
         Pipeline for Processing Documents
@@ -450,7 +503,7 @@ class MiniRAG:
 
     async def apipeline_process_enqueue_documents(
         self,
-        split_by_character: str | None = None,
+        split_by_character: Optional[str] = None,
         split_by_character_only: bool = False,
     ) -> None:
         """

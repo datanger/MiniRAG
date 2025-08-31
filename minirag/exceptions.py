@@ -1,5 +1,5 @@
 import httpx
-from typing import Literal
+from typing import Literal, Optional
 
 
 class APIStatusError(Exception):
@@ -7,10 +7,10 @@ class APIStatusError(Exception):
 
     response: httpx.Response
     status_code: int
-    request_id: str | None
+    request_id: Optional[str]
 
     def __init__(
-        self, message: str, *, response: httpx.Response, body: object | None
+        self, message: str, *, response: httpx.Response, body: Optional[object]
     ) -> None:
         super().__init__(message, response.request, body=body)
         self.response = response

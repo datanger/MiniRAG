@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Request
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Request, BackgroundTasks
 
 # Backend (Python)
 # Add this to store progress globally
@@ -49,7 +49,8 @@ import pipmaster as pm
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# 加载环境变量
+load_dotenv("config.env")
 
 
 def estimate_tokens(text: str) -> int:
@@ -426,6 +427,12 @@ def parse_args() -> argparse.Namespace:
         "--chunk_overlap_size",
         default=get_env_value("CHUNK_OVERLAP_SIZE", 100),
         help="chunk overlap size default 100",
+    )
+
+    parser.add_argument(
+        "--tiktoken-model-name",
+        default=get_env_value("TIKTOKEN_MODEL_NAME", "cl100k_base"),
+        help="Tokenizer model name for text chunking (default: from env or cl100k_base)",
     )
 
     def timeout_type(value):
@@ -892,6 +899,7 @@ def create_app(args):
             llm_model_max_token_size=args.max_tokens,
             chunk_token_size=int(args.chunk_size),
             chunk_overlap_token_size=int(args.chunk_overlap_size),
+            tiktoken_model_name=args.tiktoken_model_name,
             llm_model_kwargs={
                 "host": args.llm_binding_host,
                 "timeout": args.timeout,
@@ -917,6 +925,7 @@ def create_app(args):
             else openai_alike_model_complete,
             chunk_token_size=int(args.chunk_size),
             chunk_overlap_token_size=int(args.chunk_overlap_size),
+            tiktoken_model_name=args.tiktoken_model_name,
             llm_model_kwargs={
                 "timeout": args.timeout,
             },
@@ -957,47 +966,42 @@ def create_app(args):
         # Get file extension in lowercase
         ext = file_path.suffix.lower()
 
-        match ext:
-            case ".txt" | ".md":
-                # Text files handling
-                async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
-                    content = await f.read()
+        if ext in [".txt", ".md"]:
+            # Text files handling
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+        elif ext == ".pdf":
+            if not pm.is_installed("pypdf2"):
+                pm.install("pypdf2")
+            from PyPDF2 import PdfReader
 
-            case ".pdf":
-                if not pm.is_installed("pypdf2"):
-                    pm.install("pypdf2")
-                from PyPDF2 import PdfReader
+            # PDF handling
+            reader = PdfReader(str(file_path))
+            content = ""
+            for page in reader.pages:
+                content += page.extract_text() + "\n"
+        elif ext == ".docx":
+            if not pm.is_installed("python-docx"):
+                pm.install("python-docx")
+            from docx import Document
 
-                # PDF handling
-                reader = PdfReader(str(file_path))
-                content = ""
-                for page in reader.pages:
-                    content += page.extract_text() + "\n"
+            # Word document handling
+            doc = Document(file_path)
+            content = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+        elif ext == ".pptx":
+            if not pm.is_installed("pptx"):
+                pm.install("pptx")
+            from pptx import Presentation  # type: ignore
 
-            case ".docx":
-                if not pm.is_installed("python-docx"):
-                    pm.install("python-docx")
-                from docx import Document
-
-                # Word document handling
-                doc = Document(file_path)
-                content = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-
-            case ".pptx":
-                if not pm.is_installed("pptx"):
-                    pm.install("pptx")
-                from pptx import Presentation  # type: ignore
-
-                # PowerPoint handling
-                prs = Presentation(file_path)
-                content = ""
-                for slide in prs.slides:
-                    for shape in slide.shapes:
-                        if hasattr(shape, "text"):
-                            content += shape.text + "\n"
-
-            case _:
-                raise ValueError(f"Unsupported file format: {ext}")
+            # PowerPoint handling
+            prs = Presentation(file_path)
+            content = ""
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        content += shape.text + "\n"
+        else:
+            raise ValueError(f"Unsupported file format: {ext}")
 
         # Insert content into RAG system
         if content:
@@ -1229,14 +1233,28 @@ def create_app(args):
         Returns:
             InsertResponse: A response object containing the status of the operation, a message, and the number of documents inserted.
         """
+        import time
+        start_time = time.time()
+        
         try:
+            logging.info(f"开始插入文本 (长度: {len(request.text)} 字符)")
+            
+            # 插入到MiniRAG
+            insert_start = time.time()
             await rag.ainsert(request.text)
+            insert_time = time.time() - insert_start
+            
+            total_time = time.time() - start_time
+            logging.info(f"文本插入成功 (MiniRAG耗时: {insert_time:.3f}s, 总耗时: {total_time:.3f}s)")
+            
             return InsertResponse(
                 status="success",
                 message="Text successfully inserted",
                 document_count=1,
             )
         except Exception as e:
+            total_time = time.time() - start_time
+            logging.error(f"文本插入失败 (耗时: {total_time:.3f}s): {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post(
@@ -1262,61 +1280,56 @@ def create_app(args):
             # Get file extension in lowercase
             ext = Path(file.filename).suffix.lower()
 
-            match ext:
-                case ".txt" | ".md":
-                    # Text files handling
-                    text_content = await file.read()
-                    content = text_content.decode("utf-8")
+            if ext in [".txt", ".md"]:
+                # Text files handling
+                text_content = await file.read()
+                content = text_content.decode("utf-8")
+            elif ext == ".pdf":
+                if not pm.is_installed("pypdf2"):
+                    pm.install("pypdf2")
+                from PyPDF2 import PdfReader
+                from io import BytesIO
 
-                case ".pdf":
-                    if not pm.is_installed("pypdf2"):
-                        pm.install("pypdf2")
-                    from PyPDF2 import PdfReader
-                    from io import BytesIO
+                # Read PDF from memory
+                pdf_content = await file.read()
+                pdf_file = BytesIO(pdf_content)
+                reader = PdfReader(pdf_file)
+                content = ""
+                for page in reader.pages:
+                    content += page.extract_text() + "\n"
+            elif ext == ".docx":
+                if not pm.is_installed("python-docx"):
+                    pm.install("python-docx")
+                from docx import Document
+                from io import BytesIO
 
-                    # Read PDF from memory
-                    pdf_content = await file.read()
-                    pdf_file = BytesIO(pdf_content)
-                    reader = PdfReader(pdf_file)
-                    content = ""
-                    for page in reader.pages:
-                        content += page.extract_text() + "\n"
+                # Read DOCX from memory
+                docx_content = await file.read()
+                docx_file = BytesIO(docx_content)
+                doc = Document(docx_file)
+                content = "\n".join(
+                    [paragraph.text for paragraph in doc.paragraphs]
+                )
+            elif ext == ".pptx":
+                if not pm.is_installed("pptx"):
+                    pm.install("pptx")
+                from pptx import Presentation  # type: ignore
+                from io import BytesIO
 
-                case ".docx":
-                    if not pm.is_installed("python-docx"):
-                        pm.install("python-docx")
-                    from docx import Document
-                    from io import BytesIO
-
-                    # Read DOCX from memory
-                    docx_content = await file.read()
-                    docx_file = BytesIO(docx_content)
-                    doc = Document(docx_file)
-                    content = "\n".join(
-                        [paragraph.text for paragraph in doc.paragraphs]
-                    )
-
-                case ".pptx":
-                    if not pm.is_installed("pptx"):
-                        pm.install("pptx")
-                    from pptx import Presentation  # type: ignore
-                    from io import BytesIO
-
-                    # Read PPTX from memory
-                    pptx_content = await file.read()
-                    pptx_file = BytesIO(pptx_content)
-                    prs = Presentation(pptx_file)
-                    content = ""
-                    for slide in prs.slides:
-                        for shape in slide.shapes:
-                            if hasattr(shape, "text"):
-                                content += shape.text + "\n"
-
-                case _:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
-                    )
+                # Read PPTX from memory
+                pptx_content = await file.read()
+                pptx_file = BytesIO(pptx_content)
+                prs = Presentation(pptx_file)
+                content = ""
+                for slide in prs.slides:
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text"):
+                            content += shape.text + "\n"
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
+                )
 
             # Insert content into RAG system
             if content:
@@ -1370,53 +1383,48 @@ def create_app(args):
                     content = ""
                     ext = Path(file.filename).suffix.lower()
 
-                    match ext:
-                        case ".txt" | ".md":
-                            text_content = await file.read()
-                            content = text_content.decode("utf-8")
+                    if ext in [".txt", ".md"]:
+                        text_content = await file.read()
+                        content = text_content.decode("utf-8")
+                    elif ext == ".pdf":
+                        if not pm.is_installed("pypdf2"):
+                            pm.install("pypdf2")
+                        from PyPDF2 import PdfReader
+                        from io import BytesIO
 
-                        case ".pdf":
-                            if not pm.is_installed("pypdf2"):
-                                pm.install("pypdf2")
-                            from PyPDF2 import PdfReader
-                            from io import BytesIO
+                        pdf_content = await file.read()
+                        pdf_file = BytesIO(pdf_content)
+                        reader = PdfReader(pdf_file)
+                        for page in reader.pages:
+                            content += page.extract_text() + "\n"
+                    elif ext == ".docx":
+                        if not pm.is_installed("docx"):
+                            pm.install("docx")
+                        from docx import Document
+                        from io import BytesIO
 
-                            pdf_content = await file.read()
-                            pdf_file = BytesIO(pdf_content)
-                            reader = PdfReader(pdf_file)
-                            for page in reader.pages:
-                                content += page.extract_text() + "\n"
+                        docx_content = await file.read()
+                        docx_file = BytesIO(docx_content)
+                        doc = Document(docx_file)
+                        content = "\n".join(
+                            [paragraph.text for paragraph in doc.paragraphs]
+                        )
+                    elif ext == ".pptx":
+                        if not pm.is_installed("pptx"):
+                            pm.install("pptx")
+                        from pptx import Presentation  # type: ignore
+                        from io import BytesIO
 
-                        case ".docx":
-                            if not pm.is_installed("docx"):
-                                pm.install("docx")
-                            from docx import Document
-                            from io import BytesIO
-
-                            docx_content = await file.read()
-                            docx_file = BytesIO(docx_content)
-                            doc = Document(docx_file)
-                            content = "\n".join(
-                                [paragraph.text for paragraph in doc.paragraphs]
-                            )
-
-                        case ".pptx":
-                            if not pm.is_installed("pptx"):
-                                pm.install("pptx")
-                            from pptx import Presentation  # type: ignore
-                            from io import BytesIO
-
-                            pptx_content = await file.read()
-                            pptx_file = BytesIO(pptx_content)
-                            prs = Presentation(pptx_file)
-                            for slide in prs.slides:
-                                for shape in slide.shapes:
-                                    if hasattr(shape, "text"):
-                                        content += shape.text + "\n"
-
-                        case _:
-                            failed_files.append(f"{file.filename} (unsupported type)")
-                            continue
+                        pptx_content = await file.read()
+                        pptx_file = BytesIO(pptx_content)
+                        prs = Presentation(pptx_file)
+                        for slide in prs.slides:
+                            for shape in slide.shapes:
+                                if hasattr(shape, "text"):
+                                    content += shape.text + "\n"
+                    else:
+                        failed_files.append(f"{file.filename} (unsupported type)")
+                        continue
 
                     if content:
                         await rag.ainsert(content)
@@ -1472,9 +1480,18 @@ def create_app(args):
             InsertResponse: A response object containing the status, message, and the new document count (0 in this case).
         """
         try:
-            rag.text_chunks = []
-            rag.entities_vdb = None
-            rag.relationships_vdb = None
+            # 清空存储内容而不是覆盖存储对象
+            if hasattr(rag.text_chunks, 'drop'):
+                rag.text_chunks.drop()
+            if hasattr(rag.entities_vdb, 'drop'):
+                rag.entities_vdb.drop()
+            if hasattr(rag.relationships_vdb, 'drop'):
+                rag.relationships_vdb.drop()
+            if hasattr(rag.doc_status, 'drop'):
+                rag.doc_status.drop()
+            if hasattr(rag.full_docs, 'drop'):
+                rag.full_docs.drop()
+            
             return InsertResponse(
                 status="success",
                 message="All documents cleared successfully",
@@ -1875,7 +1892,77 @@ def create_app(args):
     @app.get("/documents", dependencies=[Depends(optional_api_key)])
     async def documents():
         """Get current system status"""
-        return doc_manager.indexed_files
+        try:
+            # 直接读取文档数据 from MiniRAG storage backends
+            doc_status_data = {}
+            if rag.doc_status:
+                try:
+                    doc_status_data = rag.doc_status.all_keys()
+                except Exception as e:
+                    logging.warning(f"获取文档状态失败: {e}")
+            
+            full_docs_data = {}
+            if rag.full_docs:
+                try:
+                    full_docs_data = rag.full_docs.all_keys()
+                except Exception as e:
+                    logging.warning(f"获取完整文档失败: {e}")
+            
+            text_chunks_data = {}
+            if rag.text_chunks:
+                try:
+                    text_chunks_data = rag.text_chunks.all_keys()
+                except Exception as e:
+                    logging.warning(f"获取文本块失败: {e}")
+            
+            documents = []
+            for doc_id in doc_status_data:
+                try:
+                    doc_status = rag.doc_status.get(doc_id)
+                    if doc_status and doc_status.get("status") == "PROCESSED":
+                        doc_info = {
+                            "id": doc_id,
+                            "status": doc_status.get("status"),
+                            "chunks_count": doc_status.get("chunks_count", 0),
+                            "content_length": doc_status.get("content_length", 0),
+                            "created_at": doc_status.get("created_at"),
+                            "updated_at": doc_status.get("updated_at")
+                        }
+                        if "content_summary" in doc_status:
+                            doc_info["content_summary"] = doc_status["content_summary"]
+                        
+                        # 获取完整文档内容
+                        if doc_id in full_docs_data:
+                            try:
+                                full_doc = rag.full_docs.get(doc_id)
+                                if full_doc:
+                                    doc_info["content"] = full_doc.get("content", "")
+                            except Exception as e:
+                                logging.warning(f"获取文档内容失败 {doc_id}: {e}")
+                        
+                        documents.append(doc_info)
+                except Exception as e:
+                    logging.warning(f"处理文档 {doc_id} 失败: {e}")
+                    continue
+            
+            return {
+                "status": "success",
+                "total_documents": len(documents),
+                "documents": documents,
+                "storage_info": {
+                    "doc_status_count": len(doc_status_data),
+                    "full_docs_count": len(full_docs_data),
+                    "text_chunks_count": len(text_chunks_data)
+                }
+            }
+        except Exception as e:
+            logging.error(f"获取文档列表失败: {e}")
+            return {
+                "status": "error",
+                "message": str(e),
+                "total_documents": 0,
+                "documents": []
+            }
 
     @app.get("/health", dependencies=[Depends(optional_api_key)])
     async def get_status():
@@ -1902,6 +1989,531 @@ def create_app(args):
                 "graph_storage": ollama_server_infos.GRAPH_STORAGE,
                 "vector_storage": ollama_server_infos.VECTOR_STORAGE,
             },
+        }
+
+    # 文件上传和解析相关API
+    @app.post("/upload/file", dependencies=[Depends(optional_api_key)])
+    async def upload_file(
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+        description: str = Form("")
+    ):
+        """上传并解析文件"""
+        import time
+        start_time = time.time()
+        
+        try:
+            logging.info(f"开始处理文件: {file.filename} (大小: {file.size} bytes)")
+            
+            # 创建上传目录
+            upload_start = time.time()
+            upload_dir = Path(args.working_dir) / "uploads"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            upload_time = time.time() - upload_start
+            logging.info(f"创建上传目录耗时: {upload_time:.3f}s")
+            
+            # 保存文件
+            save_start = time.time()
+            file_path = upload_dir / file.filename
+            with open(file_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
+            save_time = time.time() - save_start
+            logging.info(f"文件保存耗时: {save_time:.3f}s (大小: {len(content)} bytes)")
+            
+            # 后台任务：解析并索引文件
+            async def process_file():
+                process_start = time.time()
+                try:
+                    logging.info(f"开始后台处理文件: {file_path}")
+                    
+                    # 解析文件
+                    parse_start = time.time()
+                    from minirag.file_parser import parse_single_file
+                    logging.info(f"开始解析文件: {file_path}")
+                    parsed_result = await parse_single_file(str(file_path))
+                    parse_time = time.time() - parse_start
+                    
+                    if 'error' in parsed_result:
+                        logging.error(f"文件解析失败 {file_path}: {parsed_result['error']} (耗时: {parse_time:.3f}s)")
+                        return
+                    
+                    logging.info(f"文件解析成功 (耗时: {parse_time:.3f}s)")
+                    logging.info(f"解析内容长度: {len(parsed_result.get('content', ''))} 字符")
+                    
+                    # 如果有描述，添加到内容中
+                    if description:
+                        content = f"文件描述: {description}\n\n文件内容:\n{parsed_result.get('content', '')}"
+                    else:
+                        content = parsed_result.get('content', '')
+                    
+                    # 插入到MiniRAG
+                    insert_start = time.time()
+                    logging.info(f"开始插入到MiniRAG (内容长度: {len(content)} 字符)")
+                    await rag.ainsert(content)
+                    insert_time = time.time() - insert_start
+                    logging.info(f"MiniRAG插入成功 (耗时: {insert_time:.3f}s)")
+                    
+                    total_process_time = time.time() - process_start
+                    logging.info(f"文件处理完成: {file_path} (总耗时: {total_process_time:.3f}s)")
+                    
+                except Exception as e:
+                    process_time = time.time() - process_start
+                    logging.error(f"处理上传文件失败 {file_path} (耗时: {process_time:.3f}s): {e}")
+            
+            background_tasks.add_task(process_file)
+            
+            total_time = time.time() - start_time
+            logging.info(f"文件上传响应完成: {file.filename} (总耗时: {total_time:.3f}s)")
+            
+            return {
+                "status": "success",
+                "message": f"文件 {file.filename} 上传成功，正在后台处理",
+                "file_path": str(file_path),
+                "file_size": len(content),
+                "processing_time": {
+                    "upload_dir_creation": f"{upload_time:.3f}s",
+                    "file_save": f"{save_time:.3f}s",
+                    "total_response_time": f"{total_time:.3f}s"
+                }
+            }
+        except Exception as e:
+            total_time = time.time() - start_time
+            logging.error(f"文件上传失败: {file.filename} (耗时: {total_time:.3f}s): {str(e)}")
+            raise HTTPException(status_code=500, detail=f"文件上传失败: {str(e)}")
+
+    @app.post("/upload/image", dependencies=[Depends(optional_api_key)])
+    async def upload_image(
+        background_tasks: BackgroundTasks,
+        image: UploadFile = File(...),
+        description: str = Form("")
+    ):
+        """上传并解析图片（OCR）"""
+        try:
+            # 检查文件类型
+            if not image.content_type.startswith('image/'):
+                raise HTTPException(status_code=400, detail="只支持图片文件")
+            
+            # 创建上传目录
+            upload_dir = Path(args.working_dir) / "images"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 保存图片
+            image_path = upload_dir / image.filename
+            with open(image_path, "wb") as buffer:
+                content = await image.read()
+                buffer.write(content)
+            
+            # 后台任务：多模态解析并索引图片
+            async def process_image():
+                try:
+                    from minirag.file_parser import parse_single_file
+                    # 解析图片（多模态理解或OCR）
+                    parsed_result = await parse_single_file(str(image_path))
+                    
+                    if 'error' in parsed_result:
+                        logging.error(f"图片解析失败 {image_path}: {parsed_result['error']}")
+                        return
+                    
+                    # 构建内容（包含图片描述和多模态理解结果）
+                    processing_method = parsed_result.get('processing_method', 'unknown')
+                    if description:
+                        content = f"图片描述: {description}\n\n图片内容({processing_method}):\n{parsed_result.get('content', '')}"
+                    else:
+                        content = f"图片内容({processing_method}):\n{parsed_result.get('content', '')}"
+                    
+                    # 插入到MiniRAG
+                    await rag.ainsert(content)
+                    
+                    logging.info(f"图片处理成功: {image_path} (方法: {processing_method})")
+                    
+                except Exception as e:
+                    logging.error(f"处理上传图片失败 {image_path}: {e}")
+            
+            background_tasks.add_task(process_image)
+            
+            return {
+                "status": "success",
+                "message": f"图片 {image.filename} 上传成功，正在后台处理",
+                "image_path": str(image_path),
+                "file_size": len(content)
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"图片上传失败: {str(e)}")
+
+    @app.post("/query/image", dependencies=[Depends(optional_api_key)])
+    async def query_image(
+        image: UploadFile = File(...),
+        question: str = Form(...),
+        mode: str = Form("mini")
+    ):
+        """基于图片的问答"""
+        try:
+            # 检查文件类型
+            if not image.content_type.startswith('image/'):
+                raise HTTPException(status_code=400, detail="只支持图片文件")
+            
+            # 临时保存图片
+            temp_dir = Path(args.working_dir) / "temp"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            
+            temp_image_path = temp_dir / f"temp_{int(time.time())}_{image.filename}"
+            with open(temp_image_path, "wb") as buffer:
+                content = await image.read()
+                buffer.write(content)
+            
+            try:
+                # 解析图片内容
+                from minirag.file_parser import parse_single_file
+                parsed_result = await parse_single_file(str(temp_image_path))
+                
+                if 'error' in parsed_result:
+                    raise HTTPException(status_code=500, detail=f"图片解析失败: {parsed_result['error']}")
+                
+                # 构建查询（包含图片内容描述）
+                image_context = f"图片内容: {parsed_result.get('content', '')}\n\n用户问题: {question}"
+                
+                # 使用MiniRAG查询
+                response = await rag.aquery(image_context, param=QueryParam(mode=mode))
+                
+                return {
+                    "status": "success",
+                    "question": question,
+                    "answer": response,
+                    "image_content": parsed_result.get('content', ''),
+                    "image_info": {
+                        "size": parsed_result.get('image_size', ''),
+                        "mode": parsed_result.get('image_mode', '')
+                    }
+                }
+            finally:
+                # 清理临时文件
+                if temp_image_path.exists():
+                    temp_image_path.unlink()
+                    
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"图片问答失败: {str(e)}")
+
+    @app.get("/files/status", dependencies=[Depends(optional_api_key)])
+    async def get_files_status():
+        """获取文件处理状态"""
+        try:
+            # 扫描工作目录中的文件
+            working_dir = Path(args.working_dir)
+            files_info = []
+            
+            if working_dir.exists():
+                for file_path in working_dir.rglob("*"):
+                    if file_path.is_file():
+                        try:
+                            stat = file_path.stat()
+                            files_info.append({
+                                "name": file_path.name,
+                                "path": str(file_path.relative_to(working_dir)),
+                                "size": stat.st_size,
+                                "modified": stat.st_mtime,
+                                "type": file_path.suffix.lower()
+                            })
+                        except Exception:
+                            continue
+            
+            return {
+                "status": "success",
+                "total_files": len(files_info),
+                "files": files_info
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取文件状态失败: {str(e)}")
+
+    @app.get("/supported-formats", dependencies=[Depends(optional_api_key)])
+    async def get_supported_formats():
+        """获取支持的文件格式"""
+        try:
+            from minirag.file_parser import FileParserManager
+            parser_manager = FileParserManager()
+            formats = parser_manager.get_supported_formats()
+            
+            return {
+                "status": "success",
+                "supported_formats": formats
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取支持格式失败: {str(e)}")
+
+    @app.delete("/files/{file_name}", dependencies=[Depends(optional_api_key)])
+    async def delete_file(file_name: str):
+        """删除指定文件"""
+        try:
+            working_dir = Path(args.working_dir)
+            file_path = working_dir / file_name
+            
+            if not file_path.exists():
+                raise HTTPException(status_code=404, detail="文件不存在")
+            
+            # 从MiniRAG中移除相关内容（如果已索引）
+            # 这里可以添加从向量数据库、知识图谱等存储中移除内容的逻辑
+            
+            # 删除文件
+            file_path.unlink()
+            
+            return {
+                "status": "success",
+                "message": f"文件 {file_name} 删除成功"
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"删除文件失败: {str(e)}")
+
+    @app.get("/system/info", dependencies=[Depends(optional_api_key)])
+    async def get_system_info():
+        """获取系统详细信息"""
+        try:
+            import psutil
+            import platform
+            
+            # 系统信息
+            system_info = {
+                "platform": platform.system(),
+                "platform_version": platform.version(),
+                "python_version": platform.python_version(),
+                "architecture": platform.architecture()[0]
+            }
+            
+            # 内存信息
+            memory = psutil.virtual_memory()
+            memory_info = {
+                "total": memory.total,
+                "available": memory.available,
+                "percent": memory.percent,
+                "used": memory.used
+            }
+            
+            # 磁盘信息
+            disk = psutil.disk_usage(str(args.working_dir))
+            disk_info = {
+                "total": disk.total,
+                "used": disk.used,
+                "free": disk.free,
+                "percent": disk.percent
+            }
+            
+            return {
+                "status": "success",
+                "system": system_info,
+                "memory": memory_info,
+                "disk": disk_info,
+                "working_directory": str(args.working_dir),
+                "input_directory": str(args.input_dir)
+            }
+        except ImportError:
+            # 如果没有psutil，返回基本信息
+            return {
+                "status": "success",
+                "working_directory": str(args.working_dir),
+                "input_directory": str(args.input_dir),
+                "note": "安装psutil可获取更详细的系统信息"
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取系统信息失败: {str(e)}")
+
+    @app.post("/files/batch-process", dependencies=[Depends(optional_api_key)])
+    async def batch_process_files(
+        background_tasks: BackgroundTasks,
+        directory: str = Form(...),
+        file_types: str = Form("all")
+    ):
+        """批量处理指定目录中的文件"""
+        try:
+            target_dir = Path(directory)
+            if not target_dir.exists() or not target_dir.is_dir():
+                raise HTTPException(status_code=400, detail="目录不存在或不是有效目录")
+            
+            # 获取文件列表
+            file_extensions = []
+            if file_types != "all":
+                file_extensions = [ext.strip() for ext in file_types.split(",")]
+            
+            files_to_process = []
+            for file_path in target_dir.rglob("*"):
+                if file_path.is_file():
+                    if not file_extensions or file_path.suffix.lower() in file_extensions:
+                        files_to_process.append(str(file_path))
+            
+            if not files_to_process:
+                return {
+                    "status": "success",
+                    "message": "没有找到符合条件的文件",
+                    "total_files": 0
+                }
+            
+            # 后台任务：批量处理文件
+            async def process_batch_files():
+                try:
+                    from minirag.file_parser import parse_multiple_files
+                    
+                    # 批量解析文件
+                    parsed_results = await parse_multiple_files(files_to_process)
+                    
+                    # 统计结果
+                    success_count = 0
+                    error_count = 0
+                    
+                    for result in parsed_results:
+                        if 'error' not in result:
+                            try:
+                                # 插入到MiniRAG
+                                await rag.ainsert(result.get('content', ''))
+                                success_count += 1
+                            except Exception as e:
+                                logging.error(f"插入文件内容失败: {result.get('file_path', 'unknown')}: {e}")
+                                error_count += 1
+                        else:
+                            error_count += 1
+                    
+                    logging.info(f"批量处理完成: 成功 {success_count} 个文件, 失败 {error_count} 个文件")
+                    
+                except Exception as e:
+                    logging.error(f"批量处理文件失败: {e}")
+            
+            background_tasks.add_task(process_batch_files)
+            
+            return {
+                "status": "success",
+                "message": f"开始批量处理 {len(files_to_process)} 个文件",
+                "total_files": len(files_to_process),
+                "file_types": file_extensions if file_extensions else "all"
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"批量处理失败: {str(e)}")
+
+    @app.get("/files/search", dependencies=[Depends(optional_api_key)])
+    async def search_files(
+        query: str,
+        file_type: str = None,
+        size_min: int = None,
+        size_max: int = None
+    ):
+        """搜索文件"""
+        try:
+            working_dir = Path(args.working_dir)
+            files_info = []
+            
+            if working_dir.exists():
+                for file_path in working_dir.rglob("*"):
+                    if file_path.is_file():
+                        try:
+                            stat = file_path.stat()
+                            
+                            # 检查文件类型过滤
+                            if file_type and file_path.suffix.lower() != file_type.lower():
+                                continue
+                            
+                            # 检查文件大小过滤
+                            if size_min and stat.st_size < size_min:
+                                continue
+                            if size_max and stat.st_size > size_max:
+                                continue
+                            
+                            # 检查文件名是否匹配查询
+                            if query.lower() not in file_path.name.lower():
+                                continue
+                            
+                            files_info.append({
+                                "name": file_path.name,
+                                "path": str(file_path.relative_to(working_dir)),
+                                "size": stat.st_size,
+                                "modified": stat.st_mtime,
+                                "type": file_path.suffix.lower()
+                            })
+                        except Exception:
+                            continue
+            
+            return {
+                "status": "success",
+                "query": query,
+                "total_files": len(files_info),
+                "files": files_info
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"搜索文件失败: {str(e)}")
+
+    @app.get("/api/endpoints", dependencies=[Depends(optional_api_key)])
+    async def get_api_endpoints():
+        """获取所有可用的API端点信息"""
+        endpoints = [
+            {
+                "path": "/v1/chat/completions",
+                "method": "POST",
+                "description": "智能问答接口",
+                "parameters": ["model", "messages", "mode", "stream"]
+            },
+            {
+                "path": "/upload/file",
+                "method": "POST",
+                "description": "上传并解析文档文件",
+                "parameters": ["file", "description"]
+            },
+            {
+                "path": "/upload/image",
+                "method": "POST",
+                "description": "上传并解析图片（多模态理解）",
+                "parameters": ["image", "description"]
+            },
+            {
+                "path": "/query/image",
+                "method": "POST",
+                "description": "基于图片的问答",
+                "parameters": ["image", "question", "mode"]
+            },
+            {
+                "path": "/files/status",
+                "method": "GET",
+                "description": "获取文件处理状态",
+                "parameters": []
+            },
+            {
+                "path": "/supported-formats",
+                "method": "GET",
+                "description": "获取支持的文件格式",
+                "parameters": []
+            },
+            {
+                "path": "/documents",
+                "method": "GET",
+                "description": "获取已索引的文档列表",
+                "parameters": []
+            },
+            {
+                "path": "/health",
+                "method": "GET",
+                "description": "获取系统状态",
+                "parameters": []
+            },
+            {
+                "path": "/system/info",
+                "method": "GET",
+                "description": "获取系统详细信息",
+                "parameters": []
+            },
+            {
+                "path": "/files/batch-process",
+                "method": "POST",
+                "description": "批量处理文件",
+                "parameters": ["directory", "file_types"]
+            },
+            {
+                "path": "/files/search",
+                "method": "GET",
+                "description": "搜索文件",
+                "parameters": ["query", "file_type", "size_min", "size_max"]
+            }
+        ]
+        
+        return {
+            "status": "success",
+            "total_endpoints": len(endpoints),
+            "endpoints": endpoints
         }
 
     # webui mount /webui/index.html

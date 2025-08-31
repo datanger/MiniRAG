@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from functools import wraps
 from hashlib import md5
-from typing import Any, Union, List
+from typing import Any, Union, List, Optional
 import xml.etree.ElementTree as ET
 import copy
 import numpy as np
@@ -56,7 +56,7 @@ def compute_mdhash_id(content, prefix: str = ""):
     return prefix + md5(content.encode()).hexdigest()
 
 
-def compute_args_hash(*args, cache_type: str | None = None) -> str:
+def compute_args_hash(*args, cache_type: Optional[str] = None) -> str:
     args_str = "".join([str(arg) for arg in args])
     if cache_type:
         args_str = f"{cache_type}:{args_str}"
@@ -141,7 +141,11 @@ def write_json(json_obj, file_name):
 def encode_string_by_tiktoken(content: str, model_name: str = "gpt-4o"):
     global ENCODER
     if ENCODER is None:
-        ENCODER = tiktoken.encoding_for_model(model_name)
+        # 支持cl100k_base编码器
+        if model_name == "cl100k_base":
+            ENCODER = tiktoken.get_encoding("cl100k_base")
+        else:
+            ENCODER = tiktoken.encoding_for_model(model_name)
     tokens = ENCODER.encode(content)
     return tokens
 
@@ -149,7 +153,11 @@ def encode_string_by_tiktoken(content: str, model_name: str = "gpt-4o"):
 def decode_tokens_by_tiktoken(tokens: list[int], model_name: str = "gpt-4o"):
     global ENCODER
     if ENCODER is None:
-        ENCODER = tiktoken.encoding_for_model(model_name)
+        # 支持cl100k_base编码器
+        if model_name == "cl100k_base":
+            ENCODER = tiktoken.get_encoding("cl100k_base")
+        else:
+            ENCODER = tiktoken.encoding_for_model(model_name)
     content = ENCODER.decode(tokens)
     return content
 
@@ -447,7 +455,7 @@ def cosine_similarity(v1, v2):
     return dot_product / (norm1 * norm2)
 
 
-def quantize_embedding(embedding: np.ndarray | list[float], bits: int = 8):
+def quantize_embedding(embedding: Union[np.ndarray, List[float]], bits: int = 8):
     embedding = np.array(embedding)
     min_val = embedding.min()
     max_val = embedding.max()

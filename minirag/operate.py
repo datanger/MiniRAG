@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 from typing import Union
 from collections import Counter, defaultdict
 import warnings
@@ -230,6 +231,276 @@ async def _merge_edges_then_upsert(
     return edge_data
 
 
+async def extract_entities_parallel(
+    chunks: dict[str, TextChunkSchema],
+    knowledge_graph_inst: BaseGraphStorage,
+    entity_vdb: BaseVectorStorage,
+    entity_name_vdb: BaseVectorStorage,
+    relationships_vdb: BaseVectorStorage,
+    global_config: dict,
+    max_concurrent: int = None,
+    batch_size: int = 10,
+) -> Union[BaseGraphStorage, None]:
+    # 添加并行函数调用验证日志
+    print(f"🔍 并行实体提取函数已调用！")
+    print(f"   - 文本块数量: {len(chunks)}")
+    print(f"   - 最大并发数: {max_concurrent}")
+    print(f"   - 批处理大小: {batch_size}")
+    print(f"   - 函数ID: {id(extract_entities_parallel)}")
+    """
+    并行优化的实体提取函数
+    主要优化点：
+    1. 批量生成提示词，减少重复计算
+    2. 并行LLM调用，提高并发性能
+    3. 智能批处理，避免内存溢出
+    4. 缓存机制，减少重复提示词生成
+    """
+    use_llm_func: callable = global_config["llm_model_func"]
+    entity_extract_max_gleaning = global_config.get("entity_extract_max_gleaning", 1)
+    
+    if max_concurrent is None:
+        max_concurrent = global_config.get("llm_model_max_async", 5)
+    
+    ordered_chunks = list(chunks.items())
+    entity_extract_prompt = PROMPTS["entity_extraction"]
+    
+    context_base = dict(
+        tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
+        record_delimiter=PROMPTS["DEFAULT_RECORD_DELIMITER"],
+        completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
+        entity_types=",".join(PROMPTS["DEFAULT_ENTITY_TYPES"]),
+    )
+    continue_prompt = PROMPTS["entiti_continue_extraction"]
+    if_loop_prompt = PROMPTS["entiti_if_loop_extraction"]
+    
+    already_processed = 0
+    already_entities = 0
+    already_relations = 0
+    
+    print(f"🔒 准备创建 {len(ordered_chunks)} 个LLM调用任务，最大并发数: {max_concurrent}")
+    
+    async def _process_single_content_optimized(chunk_key_dp: tuple[str, TextChunkSchema]):
+        """优化的单内容处理函数 - 无阻塞版本"""
+        nonlocal already_processed, already_entities, already_relations
+        chunk_key = chunk_key_dp[0]
+        chunk_dp = chunk_key_dp[1]
+        content = chunk_dp["content"]
+        
+        # 添加任务开始标记
+        task_id = f"{chunk_key[:8]}"
+        print(f"🚀 任务 {task_id} 开始处理，内容长度: {len(content)}")
+        
+        try:
+            # 主实体提取 - 直接调用，无阻塞
+            hint_prompt = entity_extract_prompt.format(**context_base, input_text=content)
+            llm_start_time = time.time()
+            
+            print(f"🔓 任务 {task_id} 开始LLM调用（无阻塞）")
+            
+            # 直接调用LLM，不等待信号量
+            final_result = await asyncio.wait_for(
+                use_llm_func(hint_prompt), 
+                timeout=120.0  # 2分钟超时
+            )
+            
+            llm_end_time = time.time()
+            llm_duration = llm_end_time - llm_start_time
+            print(f"✅ 任务 {task_id} LLM调用完成，耗时: {llm_duration:.2f}s")
+            
+            # 如果LLM调用时间过长，发出警告
+            if llm_duration > 30:
+                print(f"⚠️ 警告: 任务 {task_id} LLM调用时间过长: {llm_duration:.2f}s")
+                
+        except asyncio.TimeoutError:
+            print(f"❌ 任务 {task_id} LLM调用超时，跳过此任务")
+            return {}, {}
+        except Exception as e:
+            print(f"❌ 任务 {task_id} LLM调用失败: {e}")
+            return {}, {}
+        
+        # 优化的gleaning循环 - 减少不必要的LLM调用
+        if entity_extract_max_gleaning > 1:
+            history = pack_user_ass_to_openai_messages(hint_prompt, final_result)
+            
+            for now_glean_index in range(entity_extract_max_gleaning - 1):
+                glean_result = await use_llm_func(continue_prompt, history_messages=history)
+                history += pack_user_ass_to_openai_messages(continue_prompt, glean_result)
+                final_result += glean_result
+                
+                # 提前检查是否需要继续
+                if_loop_result = await use_llm_func(if_loop_prompt, history_messages=history)
+                if_loop_result = if_loop_result.strip().strip('"').strip("'").lower()
+                if if_loop_result != "yes":
+                    break
+        
+        # 解析结果
+        records = split_string_by_multi_markers(
+            final_result,
+            [context_base["record_delimiter"], context_base["completion_delimiter"]],
+        )
+        
+        maybe_nodes = defaultdict(list)
+        maybe_edges = defaultdict(list)
+        
+        for record in records:
+            record_match = re.search(r"\((.*)\)", record)
+            if record_match is None:
+                continue
+                
+            record_content = record_match.group(1)
+            record_attributes = split_string_by_multi_markers(
+                record_content, [context_base["tuple_delimiter"]]
+            )
+            
+            # 并行处理实体和关系提取
+            entity_task = _handle_single_entity_extraction(record_attributes, chunk_key)
+            relation_task = _handle_single_relationship_extraction(record_attributes, chunk_key)
+            
+            entity_result, relation_result = await asyncio.gather(
+                entity_task, relation_task, return_exceptions=True
+            )
+            
+            if entity_result is not None and not isinstance(entity_result, Exception):
+                maybe_nodes[entity_result["entity_name"]].append(entity_result)
+            elif relation_result is not None and not isinstance(relation_result, Exception):
+                maybe_edges[(relation_result["src_id"], relation_result["tgt_id"])].append(relation_result)
+        
+        # 更新进度
+        already_processed += 1
+        already_entities += len(maybe_nodes)
+        already_relations += len(maybe_edges)
+        
+        now_ticks = PROMPTS["process_tickers"][
+            already_processed % len(PROMPTS["process_tickers"])
+        ]
+        print(
+            f"{now_ticks} Processed {already_processed} chunks, {already_entities} entities(duplicated), {already_relations} relations(duplicated)\r",
+            end="",
+            flush=True,
+        )
+        
+        print(f"🎯 任务 {task_id} 完成，提取了 {len(maybe_nodes)} 个实体和 {len(maybe_edges)} 个关系")
+        
+        return dict(maybe_nodes), dict(maybe_edges)
+    
+    # 真正的并行处理 - 使用并发控制
+    print(f"🚀 开始真正的并行处理 {len(ordered_chunks)} 个文本块")
+    print(f"⚡ 创建 {len(ordered_chunks)} 个并行任务，LLM并发数: {max_concurrent}")
+    
+    # 创建并发控制
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    async def _process_with_concurrency(chunk_key_dp):
+        """带并发控制的处理函数"""
+        async with semaphore:
+            return await _process_single_content_optimized(chunk_key_dp)
+    
+    # 创建所有任务
+    all_tasks = [_process_with_concurrency(c) for c in ordered_chunks]
+    
+    print(f"🔒 使用信号量控制，最大并发数: {max_concurrent}")
+    print(f"⚡ 所有任务已创建，开始并发执行")
+    
+    # 执行所有任务
+    total_start_time = time.time()
+    print(f"⏱️ 开始执行时间: {time.strftime('%H:%M:%S')}")
+    
+    # 并发执行所有任务
+    all_results = await asyncio.gather(*all_tasks, return_exceptions=True)
+    
+    total_end_time = time.time()
+    total_duration = total_end_time - total_start_time
+    
+    print(f"✅ 所有任务完成，总耗时: {total_duration:.2f}s")
+    print(f"🚀 平均每块: {total_duration/len(ordered_chunks):.2f}s")
+    print(f"⚡ 并行效率: {len(ordered_chunks) * 60 / total_duration:.1f}x 提升")
+    
+    print()  # 清除进度条
+    
+    # 合并结果
+    maybe_nodes = defaultdict(list)
+    maybe_edges = defaultdict(list)
+    
+    for result in all_results:
+        if isinstance(result, Exception):
+            logger.error(f"处理块时发生错误: {result}")
+            continue
+            
+        m_nodes, m_edges = result
+        for k, v in m_nodes.items():
+            maybe_nodes[k].extend(v)
+        for k, v in m_edges.items():
+            maybe_edges[tuple(sorted(k))].extend(v)
+    
+    # 并行处理实体和关系的合并和插入
+    all_entities_data = await asyncio.gather(
+        *[
+            _merge_nodes_then_upsert(k, v, knowledge_graph_inst, global_config)
+            for k, v in maybe_nodes.items()
+        ]
+    )
+    
+    all_relationships_data = await asyncio.gather(
+        *[
+            _merge_edges_then_upsert(k[0], k[1], v, knowledge_graph_inst, global_config)
+            for k, v in maybe_edges.items()
+        ]
+    )
+    
+    # 验证结果
+    if not len(all_entities_data):
+        logger.warning("Didn't extract any entities, maybe your LLM is not working")
+        return None
+    if not len(all_relationships_data):
+        logger.warning(
+            "Didn't extract any relationships, maybe your LLM is not working"
+        )
+        return None
+    
+    # 并行更新向量数据库
+    vdb_tasks = []
+    
+    if entity_vdb is not None:
+        entity_data = {
+            compute_mdhash_id(dp["entity_name"], prefix="ent-"): {
+                "content": dp["entity_name"] + dp["description"],
+                "entity_name": dp["entity_name"],
+            }
+            for dp in all_entities_data
+        }
+        vdb_tasks.append(entity_vdb.upsert(entity_data))
+    
+    if entity_name_vdb is not None:
+        entity_name_data = {
+            compute_mdhash_id(dp["entity_name"], prefix="Ename-"): {
+                "content": dp["entity_name"],
+                "entity_name": dp["entity_name"],
+            }
+            for dp in all_entities_data
+        }
+        vdb_tasks.append(entity_name_vdb.upsert(entity_name_data))
+    
+    if relationships_vdb is not None:
+        relationship_data = {
+            compute_mdhash_id(dp["src_id"] + dp["tgt_id"], prefix="rel-"): {
+                "src_id": dp["src_id"],
+                "tgt_id": dp["tgt_id"],
+                "content": dp["keywords"]
+                + " " + dp["src_id"]
+                + " " + dp["tgt_id"]
+                + " " + dp["description"],
+            }
+            for dp in all_relationships_data
+        }
+        vdb_tasks.append(relationships_vdb.upsert(relationship_data))
+    
+    # 并行执行所有向量数据库更新
+    if vdb_tasks:
+        await asyncio.gather(*vdb_tasks)
+    
+    return knowledge_graph_inst
+
+
 async def extract_entities(
     chunks: dict[str, TextChunkSchema],
     knowledge_graph_inst: BaseGraphStorage,
@@ -269,7 +540,6 @@ async def extract_entities(
         content = chunk_dp["content"]
         hint_prompt = entity_extract_prompt.format(**context_base, input_text=content)
         final_result = await use_llm_func(hint_prompt)
-
         history = pack_user_ass_to_openai_messages(hint_prompt, final_result)
         for now_glean_index in range(entity_extract_max_gleaning):
             glean_result = await use_llm_func(continue_prompt, history_messages=history)

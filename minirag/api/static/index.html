@@ -1,104 +1,962 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MiniRag Interface</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <title>MiniRAG - 智能问答系统</title>
     <style>
-        .fade-in {
-            animation: fadeIn 0.3s ease-in;
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
 
-        @keyframes fadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
+        body {
+            font-family: 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
         }
 
-        .spin {
+        .header {
+            text-align: center;
+            padding: 40px 20px 20px;
+            color: white;
+        }
+
+        .logo {
+            font-size: 3rem;
+            font-weight: bold;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .logo .mini {
+            color: #ff6b6b;
+        }
+
+        .logo .rag {
+            color: #4ecdc4;
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            margin-bottom: 30px;
+        }
+
+        .main-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 0 20px;
+            max-width: 800px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        .search-container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            padding: 30px;
+            margin-bottom: 30px;
+            width: 100%;
+            max-width: 700px;
+        }
+
+        .search-box {
+            position: relative;
+            margin-bottom: 20px;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 15px 50px 15px 20px;
+            border: 2px solid #e1e8ed;
+            border-radius: 25px;
+            font-size: 16px;
+            outline: none;
+            transition: all 0.3s ease;
+            background: #f8f9fa;
+        }
+
+        .search-input:focus {
+            border-color: #667eea;
+            background: white;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .search-btn {
+            position: absolute;
+            right: 5px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            padding: 10px 20px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+
+        .search-btn:hover {
+            background: #5a6fd8;
+            transform: translateY(-50%) scale(1.05);
+        }
+
+        .mode-selector {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            justify-content: center;
+        }
+
+        .mode-btn {
+            padding: 8px 16px;
+            border: 2px solid #e1e8ed;
+            border-radius: 20px;
+            background: white;
+            color: #666;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 14px;
+        }
+
+        .mode-btn.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .upload-section {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .upload-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 20px;
+            border: 2px dashed #ccc;
+            border-radius: 10px;
+            background: #f8f9fa;
+            color: #666;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 14px;
+        }
+
+        .upload-btn:hover {
+            border-color: #667eea;
+            background: #e7f3ff;
+            color: #667eea;
+        }
+
+        .upload-btn input {
+            display: none;
+        }
+
+        .result-container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            padding: 30px;
+            width: 100%;
+            max-width: 700px;
+            display: none;
+        }
+
+        .result-header {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e1e8ed;
+        }
+
+        .result-content {
+            color: #555;
+            line-height: 1.6;
+            font-size: 15px;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+            color: #667eea;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
             animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
         }
 
         @keyframes spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
 
-        .slide-in {
-            animation: slideIn 0.3s ease-out;
+        .file-preview {
+            background: #f8f9fa;
+            border: 1px solid #e1e8ed;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+            display: none;
         }
 
-        @keyframes slideIn {
-            from { transform: translateX(-100%); }
-            to { transform: translateX(0); }
+        .file-preview h4 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .file-info {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #4CAF50;
+            color: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            z-index: 1000;
+            opacity: 0;
+            transform: translateX(100%);
+            transition: all 0.3s ease;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        .toast.error {
+            background: #f44336;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: rgba(255,255,255,0.8);
+            font-size: 14px;
+        }
+
+        .quick-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .quick-btn {
+            padding: 8px 15px;
+            background: rgba(102, 126, 234, 0.1);
+            color: #667eea;
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s ease;
+        }
+
+        .quick-btn:hover {
+            background: #667eea;
+            color: white;
+        }
+
+        @media (max-width: 768px) {
+            .logo {
+                font-size: 2rem;
+            }
+            
+            .subtitle {
+                font-size: 1rem;
+            }
+            
+            .search-container,
+            .result-container {
+                margin: 0 10px;
+                padding: 20px;
+            }
+            
+            .upload-section {
+                flex-direction: column;
+                align-items: center;
+            }
+            
+            .upload-btn {
+                width: 100%;
+                justify-content: center;
+            }
         }
     </style>
 </head>
-<body class="bg-gray-50">
-    <div class="flex h-screen">
-        <!-- Sidebar -->
-        <div class="w-64 bg-white shadow-lg">
-            <div class="p-4">
-                <h1 class="text-xl font-bold text-gray-800 mb-6">MiniRag</h1>
-                <nav class="space-y-2">
-                    <a href="#" class="nav-item" data-page="file-manager">
-                        <div class="flex items-center p-2 rounded-lg hover:bg-gray-100 transition-colors">
-                            <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
-                            </svg>
-                            File Manager
-                        </div>
-                    </a>
-                    <a href="#" class="nav-item" data-page="query">
-                        <div class="flex items-center p-2 rounded-lg hover:bg-gray-100 transition-colors">
-                            <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                            </svg>
-                            Query Database
-                        </div>
-                    </a>
-                    <a href="#" class="nav-item" data-page="knowledge-graph">
-                        <div class="flex items-center p-2 rounded-lg hover:bg-gray-100 transition-colors">
-                            <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                            </svg>
-                            Knowledge Graph
-                        </div>
-                    </a>
-                    <a href="#" class="nav-item" data-page="status">
-                        <div class="flex items-center p-2 rounded-lg hover:bg-gray-100 transition-colors">
-                            <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-                            </svg>
-                            Status
-                        </div>
-                    </a>
-                    <a href="#" class="nav-item" data-page="settings">
-                        <div class="flex items-center p-2 rounded-lg hover:bg-gray-100 transition-colors">
-                            <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-                            </svg>
-                            Settings
-                        </div>
-                    </a>
-                </nav>
+<body>
+    <div class="header">
+        <div class="logo">
+            <span class="mini">Mini</span><span class="rag">RAG</span>
+        </div>
+        <div class="subtitle">智能文档问答系统 - 让知识触手可及</div>
+    </div>
+
+    <div class="main-container">
+        <div class="search-container">
+            <div class="search-box">
+                <input type="text" class="search-input" id="questionInput" 
+                       placeholder="请输入您的问题，或上传文档进行智能问答..." />
+                <button class="search-btn" onclick="askQuestion()">搜索</button>
+            </div>
+
+            <div class="mode-selector">
+                <button class="mode-btn active" data-mode="mini">智能模式</button>
+                <button class="mode-btn" data-mode="light">轻量模式</button>
+                <button class="mode-btn" data-mode="naive">基础模式</button>
+            </div>
+
+            <div class="action-buttons">
+                <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+                    📄 上传文档
+                </button>
+                <label class="upload-btn">
+                    <input type="file" id="imageInput" accept="image/*" 
+                           onchange="uploadImage(this)" />
+                    🖼️ 上传图片（多模态理解）
+                </label>
+                <button class="upload-btn" onclick="queryWithImage()">
+                    🔍 图片问答（多模态）
+                </button>
+                <button class="upload-btn" onclick="showSystemInfo()">
+                    💻 系统信息
+                </button>
+                <button class="upload-btn" onclick="refreshFilesStatus()">
+                    🔄 刷新状态
+                </button>
+            </div>
+
+            <!-- 隐藏的文件输入框 -->
+            <input type="file" id="fileInput" accept=".pdf,.docx,.doc,.txt,.md,.pptx,.ppt" 
+                   onchange="uploadFile(this)" style="display: none;" />
+            <input type="file" id="hiddenImageInput" accept="image/*" 
+                   onchange="handleImageForQuery(this)" style="display: none;" />
+
+            <!-- 文件搜索和批量处理区域 -->
+            <div class="advanced-actions" style="margin-top: 20px; padding: 20px; background: rgba(255,255,255,0.1); border-radius: 10px;">
+                <h3 style="color: white; margin-bottom: 15px;">高级功能</h3>
+                
+                <!-- 文件搜索 -->
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: white; margin-bottom: 10px;">🔍 文件搜索</h4>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                        <input type="text" id="searchQuery" placeholder="输入文件名关键词" 
+                               style="padding: 8px 12px; border: none; border-radius: 5px; flex: 1; min-width: 200px;" />
+                        <select id="searchFileType" style="padding: 8px 12px; border: none; border-radius: 5px;">
+                            <option value="">所有类型</option>
+                            <option value=".pdf">PDF</option>
+                            <option value=".docx">Word</option>
+                            <option value=".pptx">PowerPoint</option>
+                            <option value=".txt">文本</option>
+                            <option value=".md">Markdown</option>
+                            <option value=".png">图片</option>
+                        </select>
+                        <button onclick="searchFiles(document.getElementById('searchQuery').value, document.getElementById('searchFileType').value)" 
+                                style="background: #28a745; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer;">
+                            搜索
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 批量处理 -->
+                <div>
+                    <h4 style="color: white; margin-bottom: 10px;">⚡ 批量处理</h4>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                        <input type="text" id="batchDirectory" placeholder="输入目录路径" 
+                               style="padding: 8px 12px; border: none; border-radius: 5px; flex: 1; min-width: 200px;" />
+                        <select id="batchFileTypes" style="padding: 8px 12px; border: none; border-radius: 5px;">
+                            <option value="all">所有类型</option>
+                            <option value=".pdf,.docx,.pptx,.txt,.md">文档</option>
+                            <option value=".png,.jpg,.jpeg,.bmp,.tiff,.gif,.webp">图片</option>
+                        </select>
+                        <button onclick="batchProcessFiles(document.getElementById('batchDirectory').value, document.getElementById('batchFileTypes').value)" 
+                                style="background: #17a2b8; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer;">
+                            开始处理
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="quick-actions">
+                <button class="quick-btn" onclick="setQuestion('请总结一下主要内容')">总结内容</button>
+                <button class="quick-btn" onclick="setQuestion('有哪些关键信息？')">关键信息</button>
+                <button class="quick-btn" onclick="setQuestion('请解释这个概念')">概念解释</button>
+                <button class="quick-btn" onclick="setQuestion('有什么建议吗？')">获取建议</button>
+            </div>
+
+            <div class="file-preview" id="filePreview">
+                <h4>文件预览</h4>
+                <div class="file-info" id="fileInfo"></div>
             </div>
         </div>
 
-        <!-- Main Content -->
-        <div class="flex-1 overflow-auto p-6">
-            <div id="content" class="fade-in"></div>
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <div>正在思考中...</div>
         </div>
 
-        <!-- Toast Notification -->
-        <div id="toast" class="fixed bottom-4 right-4 hidden">
-            <div class="bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg"></div>
+        <div class="result-container" id="resultContainer">
+            <div class="result-header">智能回答</div>
+            <div class="result-content" id="resultContent"></div>
         </div>
     </div>
 
-    <script src="/js/api.js"></script>
+    <div class="footer">
+        <p>© 2024 MiniRAG - 基于先进的检索增强生成技术</p>
+        <p>支持格式: PDF, Word, PPT, Markdown, 图片等</p>
+    </div>
 
+    <script>
+        let currentMode = 'mini';
+        let uploadedFiles = [];
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            // 模式选择器事件
+            document.querySelectorAll('.mode-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                    this.classList.add('active');
+                    currentMode = this.dataset.mode;
+                });
+            });
+
+            // 回车搜索
+            document.getElementById('questionInput').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    askQuestion();
+                }
+            });
+        });
+
+        // 设置问题
+        function setQuestion(question) {
+            document.getElementById('questionInput').value = question;
+        }
+
+        // 显示提示消息
+        function showToast(message, isError = false) {
+            const toast = document.createElement('div');
+            toast.className = 'toast' + (isError ? ' error' : '');
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            
+            setTimeout(() => toast.classList.add('show'), 100);
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => document.body.removeChild(toast), 300);
+            }, 3000);
+        }
+
+        // 显示加载状态
+        function showLoading(show = true) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+            document.getElementById('resultContainer').style.display = show ? 'none' : 'block';
+        }
+
+        // 提问
+        async function askQuestion() {
+            const question = document.getElementById('questionInput').value.trim();
+            if (!question) {
+                showToast('请输入问题', true);
+                return;
+            }
+
+            showLoading(true);
+
+            try {
+                const response = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        model: 'minirag',
+                        messages: [
+                            {
+                                role: 'user',
+                                content: question
+                            }
+                        ],
+                        mode: currentMode,
+                        stream: false
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('请求失败');
+                }
+
+                const data = await response.json();
+                const answer = data.message?.content || data.choices?.[0]?.message?.content || '抱歉，无法获取回答';
+                
+                document.getElementById('resultContent').textContent = answer;
+                showLoading(false);
+                
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('请求失败，请稍后重试', true);
+                showLoading(false);
+            }
+        }
+
+        // 上传文档
+        async function uploadFile(input) {
+            const file = input.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('description', `用户上传的文档: ${file.name}`);
+
+            try {
+                showToast('正在上传文档...');
+                
+                const response = await fetch('/upload/file', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error('上传失败');
+                }
+
+                const data = await response.json();
+                showToast('文档上传成功，正在后台处理...');
+                
+                // 显示文件预览
+                document.getElementById('filePreview').style.display = 'block';
+                document.getElementById('fileInfo').innerHTML = `
+                    <strong>文件名:</strong> ${file.name}<br>
+                    <strong>大小:</strong> ${(file.size / 1024 / 1024).toFixed(2)} MB<br>
+                    <strong>状态:</strong> 处理中...
+                `;
+
+                uploadedFiles.push({
+                    name: file.name,
+                    path: data.file_path,
+                    size: file.size
+                });
+
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('文档上传失败', true);
+            }
+        }
+
+        // 上传图片
+        async function uploadImage(input) {
+            const file = input.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('image', file);
+            formData.append('description', `用户上传的图片: ${file.name}`);
+
+            try {
+                showToast('正在上传图片...');
+                
+                const response = await fetch('/upload/image', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error('上传失败');
+                }
+
+                const data = await response.json();
+                showToast('图片上传成功，正在后台处理...');
+                
+                // 显示文件预览
+                document.getElementById('filePreview').style.display = 'block';
+                document.getElementById('fileInfo').innerHTML = `
+                    <strong>文件名:</strong> ${file.name}<br>
+                    <strong>大小:</strong> ${(file.size / 1024 / 1024).toFixed(2)} MB<br>
+                    <strong>状态:</strong> OCR处理中...
+                `;
+
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('图片上传失败', true);
+            }
+        }
+
+        // 图片问答
+        function queryWithImage() {
+            document.getElementById('hiddenImageInput').click();
+        }
+
+        // 处理图片问答
+        async function handleImageForQuery(input) {
+            const file = input.files[0];
+            if (!file) return;
+
+            const question = document.getElementById('questionInput').value.trim();
+            if (!question) {
+                showToast('请先输入问题', true);
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('image', file);
+            formData.append('question', question);
+            formData.append('mode', currentMode);
+
+            try {
+                showLoading(true);
+                showToast('正在分析图片...');
+                
+                const response = await fetch('/query/image', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error('请求失败');
+                }
+
+                const data = await response.json();
+                const answer = data.answer || '抱歉，无法获取回答';
+                
+                document.getElementById('resultContent').innerHTML = `
+                    <div style="margin-bottom: 15px;">
+                        <strong>图片内容:</strong><br>
+                        <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 5px 0;">
+                            ${data.image_content || '无法识别图片内容'}
+                        </div>
+                    </div>
+                    <div>
+                        <strong>智能回答:</strong><br>
+                        ${answer}
+                    </div>
+                `;
+                
+                showLoading(false);
+                showToast('图片分析完成');
+                
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('图片问答失败', true);
+                showLoading(false);
+            }
+        }
+
+        // 获取支持的格式
+        async function getSupportedFormats() {
+            try {
+                const response = await fetch('/supported-formats');
+                const data = await response.json();
+                console.log('支持的格式:', data.supported_formats);
+            } catch (error) {
+                console.error('获取支持格式失败:', error);
+            }
+        }
+
+        // 获取系统信息
+        async function getSystemInfo() {
+            try {
+                const response = await fetch('/system/info');
+                const data = await response.json();
+                console.log('系统信息:', data);
+                return data;
+            } catch (error) {
+                console.error('获取系统信息失败:', error);
+                return null;
+            }
+        }
+
+        // 获取API端点信息
+        async function getApiEndpoints() {
+            try {
+                const response = await fetch('/api/endpoints');
+                const data = await response.json();
+                console.log('API端点:', data.endpoints);
+                return data.endpoints;
+            } catch (error) {
+                console.error('获取API端点失败:', error);
+                return [];
+            }
+        }
+
+        // 删除文件
+        async function deleteFile(fileName) {
+            if (!confirm(`确定要删除文件 ${fileName} 吗？`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/files/${fileName}`, {
+                    method: 'DELETE'
+                });
+
+                if (!response.ok) {
+                    throw new Error('删除失败');
+                }
+
+                const data = await response.json();
+                showToast(data.message);
+                
+                // 刷新文件状态
+                refreshFilesStatus();
+                
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('删除文件失败', true);
+            }
+        }
+
+        // 搜索文件
+        async function searchFiles(query, fileType = null, sizeMin = null, sizeMax = null) {
+            try {
+                let url = `/files/search?query=${encodeURIComponent(query)}`;
+                if (fileType) url += `&file_type=${fileType}`;
+                if (sizeMin) url += `&size_min=${sizeMin}`;
+                if (sizeMax) url += `&size_max=${sizeMax}`;
+
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    displaySearchResults(data.files, data.total_files);
+                } else {
+                    showToast('搜索失败', true);
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('搜索文件失败', true);
+            }
+        }
+
+        // 显示搜索结果
+        function displaySearchResults(files, total) {
+            const resultContainer = document.getElementById('resultContainer');
+            const resultContent = document.getElementById('resultContent');
+            
+            if (files.length === 0) {
+                resultContent.innerHTML = '<p>没有找到匹配的文件</p>';
+                resultContainer.style.display = 'block';
+                return;
+            }
+
+            let html = `<h3>搜索结果 (共 ${total} 个文件)</h3>`;
+            html += '<div style="max-height: 400px; overflow-y: auto;">';
+            
+            files.forEach(file => {
+                const size = (file.size / 1024 / 1024).toFixed(2);
+                const modified = new Date(file.modified * 1000).toLocaleString();
+                
+                html += `
+                    <div style="border: 1px solid #ddd; padding: 10px; margin: 5px 0; border-radius: 5px; background: #f9f9f9;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <strong>${file.name}</strong><br>
+                                <small>路径: ${file.path}</small><br>
+                                <small>大小: ${size} MB | 类型: ${file.type} | 修改时间: ${modified}</small>
+                            </div>
+                            <button onclick="deleteFile('${file.name}')" style="background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer;">
+                                删除
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += '</div>';
+            resultContent.innerHTML = html;
+            resultContainer.style.display = 'block';
+        }
+
+        // 批量处理文件
+        async function batchProcessFiles(directory, fileTypes = 'all') {
+            try {
+                const formData = new FormData();
+                formData.append('directory', directory);
+                formData.append('file_types', fileTypes);
+
+                showToast('开始批量处理文件...');
+                
+                const response = await fetch('/files/batch-process', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error('批量处理失败');
+                }
+
+                const data = await response.json();
+                showToast(data.message);
+                
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('批量处理失败', true);
+            }
+        }
+
+        // 刷新文件状态
+        async function refreshFilesStatus() {
+            try {
+                const response = await fetch('/files/status');
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    updateFileStatusDisplay(data.files);
+                }
+            } catch (error) {
+                console.error('刷新文件状态失败:', error);
+            }
+        }
+
+        // 更新文件状态显示
+        function updateFileStatusDisplay(files) {
+            const filePreview = document.getElementById('filePreview');
+            const fileInfo = document.getElementById('fileInfo');
+            
+            if (files.length === 0) {
+                filePreview.style.display = 'none';
+                return;
+            }
+
+            filePreview.style.display = 'block';
+            
+            let html = `<h4>文件状态 (共 ${files.length} 个文件)</h4>`;
+            html += '<div style="max-height: 300px; overflow-y: auto;">';
+            
+            files.slice(0, 10).forEach(file => { // 只显示前10个文件
+                const size = (file.size / 1024 / 1024).toFixed(2);
+                const modified = new Date(file.modified * 1000).toLocaleString();
+                
+                html += `
+                    <div style="border: 1px solid #ddd; padding: 8px; margin: 3px 0; border-radius: 3px; background: #f9f9f9;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <strong>${file.name}</strong><br>
+                                <small>大小: ${size} MB | 类型: ${file.type} | 修改: ${modified}</small>
+                            </div>
+                            <button onclick="deleteFile('${file.name}')" style="background: #dc3545; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 12px;">
+                                删除
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            if (files.length > 10) {
+                html += `<p style="text-align: center; color: #666;">... 还有 ${files.length - 10} 个文件</p>`;
+            }
+            
+            html += '</div>';
+            fileInfo.innerHTML = html;
+        }
+
+        // 显示系统信息
+        async function showSystemInfo() {
+            const systemInfo = await getSystemInfo();
+            if (!systemInfo) return;
+
+            const resultContainer = document.getElementById('resultContainer');
+            const resultContent = document.getElementById('resultContent');
+            
+            let html = '<h3>系统信息</h3>';
+            
+            if (systemInfo.system) {
+                html += `
+                    <div style="margin-bottom: 15px;">
+                        <strong>系统信息:</strong><br>
+                        <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 5px 0;">
+                            平台: ${systemInfo.system.platform} ${systemInfo.system.platform_version}<br>
+                            Python版本: ${systemInfo.system.python_version}<br>
+                            架构: ${systemInfo.system.architecture}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            if (systemInfo.memory) {
+                const totalGB = (systemInfo.memory.total / 1024 / 1024 / 1024).toFixed(2);
+                const usedGB = (systemInfo.memory.used / 1024 / 1024 / 1024).toFixed(2);
+                const availableGB = (systemInfo.memory.available / 1024 / 1024 / 1024).toFixed(2);
+                
+                html += `
+                    <div style="margin-bottom: 15px;">
+                        <strong>内存信息:</strong><br>
+                        <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 5px 0;">
+                            总内存: ${totalGB} GB<br>
+                            已使用: ${usedGB} GB (${systemInfo.memory.percent}%)<br>
+                            可用: ${availableGB} GB
+                        </div>
+                    </div>
+                `;
+            }
+            
+            if (systemInfo.disk) {
+                const totalGB = (systemInfo.disk.total / 1024 / 1024 / 1024).toFixed(2);
+                const usedGB = (systemInfo.disk.used / 1024 / 1024 / 1024).toFixed(2);
+                const freeGB = (systemInfo.disk.free / 1024 / 1024 / 1024).toFixed(2);
+                
+                html += `
+                    <div style="margin-bottom: 15px;">
+                        <strong>磁盘信息:</strong><br>
+                        <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 5px 0;">
+                            总空间: ${totalGB} GB<br>
+                            已使用: ${usedGB} GB (${systemInfo.disk.percent}%)<br>
+                            可用: ${freeGB} GB
+                        </div>
+                    </div>
+                `;
+            }
+            
+            html += `
+                <div style="margin-bottom: 15px;">
+                    <strong>工作目录:</strong><br>
+                    <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; margin: 5px 0;">
+                        ${systemInfo.working_directory}
+                    </div>
+                </div>
+            `;
+            
+            if (systemInfo.note) {
+                html += `<p style="color: #666; font-style: italic;">${systemInfo.note}</p>`;
+            }
+            
+            resultContent.innerHTML = html;
+            resultContainer.style.display = 'block';
+        }
+
+        // 页面加载时获取支持格式
+        getSupportedFormats();
+        
+        // 页面加载时获取文件状态
+        refreshFilesStatus();
+    </script>
 </body>
 </html>
