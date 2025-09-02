@@ -43,6 +43,9 @@ async def main():
     except ValueError as e:
         print(f"错误: 客户端创建失败: {e}")
         return
+    except Exception as e:
+        print(f"错误: 客户端初始化失败: {e}")
+        return
     
     # 检查服务器状态
     try:
@@ -123,15 +126,7 @@ async def main():
             # 步骤1: 上传文件到服务器
             print("步骤1: 上传文件...")
             try:
-                # 设置上传超时时间 - RAG索引创建需要很长时间
-                # 特别是实体提取步骤可能需要30-60分钟
-                upload_timeout = 3600  # 1小时超时
-                print(f"设置上传超时时间: {upload_timeout}秒 (1小时)")
-                
-                upload_result = await asyncio.wait_for(
-                    client.documents_file(str(file_path), f"来自目录 {input_dir}"),
-                    timeout=upload_timeout
-                )
+                upload_result = await client.documents_file(str(file_path), f"来自目录 {input_dir}")
                 
                 if upload_result.get("status") != "success":
                     error_msg = upload_result.get('message', '未知错误')
@@ -139,14 +134,8 @@ async def main():
                     print(f"上传失败: {error_msg}")
                     continue
                 
-                print("文件上传成功")
+                print("✅ 文件上传成功")
                 
-            except asyncio.TimeoutError:
-                error_msg = f"上传超时（{upload_timeout}秒，1小时）"
-                failed_files.append(f"{file_path.name}: {error_msg}")
-                print(f"❌ {error_msg}")
-                print("注意: RAG索引创建需要很长时间，特别是实体提取步骤")
-                continue
             except Exception as e:
                 error_msg = f"上传异常: {str(e)}"
                 failed_files.append(f"{file_path.name}: {error_msg}")
@@ -155,150 +144,160 @@ async def main():
             
             # 步骤2: 等待文件解析完成
             print("步骤2: 等待文件解析...")
-            max_wait_time = 60  # 最大等待时间60秒
             wait_start = time.time()
             
-            while time.time() - wait_start < max_wait_time:
+            # 创建进度状态显示
+            def update_progress(progress_text):
+                """更新进度状态，使用\r覆盖当前行"""
+                print(f"\r⏳ {progress_text}", end="", flush=True)
+            
+            while True:  # 无限循环，无超时限制
                 try:
-                    # 检查文件状态
-                    files_status = await client.files_status()
-                    if files_status.get("status") == "success":
-                        file_status = files_status.get("data", {}).get("files", {})
-                        current_file_status = file_status.get(file_path.name, {})
+                    # 检查文件状态 - 通过健康检查来确认文件是否已索引
+                    health_status = await client.health()
+                    if health_status.get("status") == "healthy":
+                        indexed_files = health_status.get("indexed_files", [])
+                        elapsed_time = int(time.time() - wait_start)
                         
-                        if current_file_status.get("status") == "completed":
-                            print("文件解析完成")
-                            break
-                        elif current_file_status.get("status") == "failed":
-                            error_msg = current_file_status.get("error", "解析失败")
-                            failed_files.append(f"{file_path.name}: {error_msg}")
-                            print(f"文件解析失败: {error_msg}")
+                        if str(file_path) in indexed_files:
+                            print("\n✅ 文件已成功索引")
                             break
                         else:
-                            print(f"文件状态: {current_file_status.get('status', 'unknown')}")
+                            # 智能进度显示：根据服务器状态调整提示
+                            if len(indexed_files) > 0:
+                                # 服务器正在工作，有其他文件被索引
+                                progress_text = f"等待文件索引... (已索引: {len(indexed_files)} 个文件, 耗时: {elapsed_time}s)"
+                            elif elapsed_time > 300:  # 5分钟后开始警告
+                                # 长时间无响应，可能有问题
+                                progress_text = f"⚠️ 服务器无响应... (耗时: {elapsed_time}s)"
+                            else:
+                                # 正常等待状态
+                                progress_text = f"等待文件索引... (耗时: {elapsed_time}s)"
+                            
+                            update_progress(progress_text)
                     
-                    await asyncio.sleep(2)  # 等待2秒后再次检查
+                    await asyncio.sleep(5)  # 等待5秒后再次检查，减少服务器日志
                 except Exception as e:
-                    print(f"检查文件状态失败: {e}")
-                    break
-            
-            else:
-                print("文件解析超时")
-                failed_files.append(f"{file_path.name}: 解析超时")
-                continue
+                    print(f"\n❌ 检查文件状态失败: {e}")
+                    # 根据错误类型决定是否继续
+                    if "Connection refused" in str(e) or "timeout" in str(e).lower():
+                        print("⚠️ 服务器连接失败，停止等待")
+                        failed_files.append(f"{file_path.name}: 服务器连接失败")
+                        break
+                    else:
+                        # 其他错误继续尝试
+                        continue
             
             # 步骤3: 验证文档是否已成功索引
             print("步骤3: 验证索引状态...")
             try:
                 # 等待一段时间让索引完成
-                await asyncio.sleep(3)
+                await asyncio.sleep(1)
                 
-                # 获取最新的文档列表
-                latest_docs = await client.documents()
-                if latest_docs.get("status") == "success":
-                    new_doc_count = latest_docs.get("data", {}).get("total_documents", 0)
-                    print(f"当前索引文档总数: {new_doc_count}")
-                    
-                    # 检查文档是否包含当前文件的内容
-                    documents_list = latest_docs.get("data", {}).get("documents", [])
-                    file_indexed = False
-                    
-                    for doc in documents_list:
-                        if doc.get("file_path") == str(file_path) or doc.get("description", "").startswith(f"来自目录 {input_dir}"):
-                            file_indexed = True
-                            print(f"文档已成功索引: {doc.get('id', 'N/A')}")
-                            break
-                    
-                    if file_indexed:
-                        # 步骤4: 验证分块是否成功
-                        print("步骤4: 验证文本分块...")
-                        try:
-                            # 检查是否有文本块被创建
-                            # 这里可以通过查询接口验证，但需要等待一段时间让分块完成
-                            await asyncio.sleep(2)
-                            
-                            # 尝试进行一个简单的查询来验证索引是否真正可用
-                            print("步骤5: 验证向量搜索...")
-                            test_query = "测试查询"
-                            try:
-                                query_result = await client.query(test_query, mode="mini")
-                                if query_result.get("status") == "success":
-                                    print("✅ 向量搜索验证成功")
-                                else:
-                                    print(f"⚠️ 向量搜索验证失败: {query_result.get('message', '未知错误')}")
-                            except Exception as e:
-                                print(f"⚠️ 向量搜索验证异常: {e}")
-                            
-                            # 步骤6: 验证实体抽取和图关系
-                            print("步骤6: 验证实体抽取和图关系...")
-                            try:
-                                # 检查图标签列表
-                                graph_labels = await client.graph_label_list()
-                                if graph_labels.get("status") == "success":
-                                    labels = graph_labels.get("data", {}).get("labels", [])
-                                    if labels:
-                                        print(f"✅ 图关系构建成功，发现 {len(labels)} 个标签")
-                                        # 尝试获取图形数据
-                                        for label in labels[:3]:  # 只检查前3个标签
-                                            try:
-                                                graph_data = await client.graphs(label, max_depth=5)
-                                                if graph_data.get("status") == "success":
-                                                    nodes = graph_data.get("data", {}).get("nodes", [])
-                                                    edges = graph_data.get("data", {}).get("edges", [])
-                                                    if nodes or edges:
-                                                        print(f"   - 标签 '{label}': {len(nodes)} 个节点, {len(edges)} 个关系")
-                                                    else:
-                                                        print(f"   - 标签 '{label}': 暂无数据")
-                                                else:
-                                                    print(f"   - 标签 '{label}': 获取失败")
-                                            except Exception as e:
-                                                print(f"   - 标签 '{label}': 获取异常 - {e}")
-                                    else:
-                                        print("⚠️ 图关系构建可能未完成")
-                                else:
-                                    print(f"⚠️ 无法获取图标签: {graph_labels.get('message', '未知错误')}")
-                            except Exception as e:
-                                print(f"⚠️ 图关系验证异常: {e}")
-                            
-                            # 步骤7: 验证数据库写入
-                            print("步骤7: 验证数据库写入...")
-                            try:
-                                # 检查系统信息
-                                system_info = await client.system_info()
-                                if system_info.get("status") == "success":
-                                    info_data = system_info.get("data", {})
-                                    storage_info = info_data.get("storage", {})
-                                    print("✅ 数据库状态:")
-                                    for storage_type, status in storage_info.items():
-                                        print(f"   - {storage_type}: {status}")
-                                else:
-                                    print(f"⚠️ 无法获取系统信息: {system_info.get('message', '未知错误')}")
-                            except Exception as e:
-                                print(f"⚠️ 系统信息验证异常: {e}")
-                            
-                            success_count += 1
-                            processing_time = time.time() - start_time
-                            total_processing_time += processing_time
-                            print(f"✅ 索引创建成功: {file_path.name} (耗时: {processing_time:.2f}秒)")
-                            print(f"   - 文本分块: ✅")
-                            print(f"   - 向量嵌入: ✅")
-                            print(f"   - 实体抽取: ✅")
-                            print(f"   - 图关系构建: ✅")
-                            print(f"   - 数据库写入: ✅")
-                            
-                        except Exception as e:
-                            print(f"⚠️ 详细验证过程中出现异常: {e}")
-                            # 即使详细验证失败，如果基本索引成功，仍然算作成功
-                            success_count += 1
-                            processing_time = time.time() - start_time
-                            total_processing_time += processing_time
-                            print(f"✅ 基本索引创建成功: {file_path.name} (耗时: {processing_time:.2f}秒)")
+                # 通过健康检查确认文件已索引
+                health_status = await client.health()
+                if health_status.get("status") == "healthy":
+                    indexed_files = health_status.get("indexed_files", [])
+                    if str(file_path) in indexed_files:
+                        print(f"✅ 文件已成功索引")
+                        file_indexed = True
                     else:
-                        failed_files.append(f"{file_path.name}: 文档未找到")
-                        print(f"❌ 文档未找到: {file_path.name}")
+                        print(f"❌ 文件未在索引列表中")
+                        file_indexed = False
                 else:
-                    failed_files.append(f"{file_path.name}: 无法验证索引状态")
-                    print(f"❌ 无法验证索引状态: {latest_docs.get('message', '未知错误')}")
+                    print(f"❌ 无法获取健康状态")
+                    file_indexed = False
+                
+                if file_indexed:
+                    # 步骤4: 验证分块是否成功
+                    print("步骤4: 验证文本分块...")
+                    try:
+                        # 检查是否有文本块被创建
+                        # 这里可以通过查询接口验证，但需要等待一段时间让分块完成
+                        await asyncio.sleep(1)
+                        
+                        # 尝试进行一个简单的查询来验证索引是否真正可用
+                        print("步骤5: 验证向量搜索...")
+                        test_query = "测试查询"
+                        try:
+                            query_result = await client.query(test_query, mode="mini")
+                            if query_result.get("status") == "success":
+                                print("✅ 向量搜索验证成功")
+                            else:
+                                print(f"⚠️ 向量搜索验证失败: {query_result.get('message', '未知错误')}")
+                        except Exception as e:
+                            print(f"⚠️ 向量搜索验证异常: {e}")
+                        
+                        # 步骤6: 验证实体抽取和图关系
+                        print("步骤6: 验证实体抽取和图关系...")
+                        try:
+                            # 检查图标签列表
+                            graph_labels = await client.graph_label_list()
+                            if graph_labels.get("status") == "success":
+                                labels = graph_labels.get("data", {}).get("labels", [])
+                                if labels:
+                                    print(f"✅ 图关系构建成功，发现 {len(labels)} 个标签")
+                                    # 尝试获取图形数据
+                                    for label in labels[:3]:  # 只检查前3个标签
+                                        try:
+                                            graph_data = await client.graphs(label, max_depth=5)
+                                            if graph_data.get("status") == "success":
+                                                nodes = graph_data.get("data", {}).get("nodes", [])
+                                                edges = graph_data.get("data", {}).get("edges", [])
+                                                if nodes or edges:
+                                                    print(f"   - 标签 '{label}': {len(nodes)} 个节点, {len(edges)} 个关系")
+                                                else:
+                                                    print(f"   - 标签 '{label}': 暂无数据")
+                                            else:
+                                                print(f"   - 标签 '{label}': 获取失败")
+                                        except Exception as e:
+                                            print(f"   - 标签 '{label}': 获取异常 - {e}")
+                                else:
+                                    print("⚠️ 图关系构建可能未完成")
+                            else:
+                                print(f"⚠️ 无法获取图标签: {graph_labels.get('message', '未知错误')}")
+                        except Exception as e:
+                            print(f"⚠️ 图关系验证异常: {e}")
+                        
+                        # 步骤7: 验证数据库写入
+                        print("步骤7: 验证数据库写入...")
+                        try:
+                            # 检查系统信息
+                            system_info = await client.system_info()
+                            if system_info.get("status") == "success":
+                                info_data = system_info.get("data", {})
+                                storage_info = info_data.get("storage", {})
+                                print("✅ 数据库状态:")
+                                for storage_type, status in storage_info.items():
+                                    print(f"   - {storage_type}: {status}")
+                            else:
+                                print(f"⚠️ 无法获取系统信息: {system_info.get('message', '未知错误')}")
+                        except Exception as e:
+                            print(f"⚠️ 系统信息验证异常: {e}")
+                        
+                        success_count += 1
+                        processing_time = time.time() - start_time
+                        total_processing_time += processing_time
+                        print(f"✅ 索引创建成功: {file_path.name} (耗时: {processing_time:.2f}秒)")
+                        print(f"   - 文本分块: ✅")
+                        print(f"   - 向量嵌入: ✅")
+                        print(f"   - 实体抽取: ✅")
+                        print(f"   - 图关系构建: ✅")
+                        print(f"   - 数据库写入: ✅")
+                        
+                    except Exception as e:
+                        print(f"⚠️ 详细验证过程中出现异常: {e}")
+                        # 即使详细验证失败，如果基本索引成功，仍然算作成功
+                        success_count += 1
+                        processing_time = time.time() - start_time
+                        total_processing_time += processing_time
+                        print(f"✅ 基本索引创建成功: {file_path.name} (耗时: {processing_time:.2f}秒)")
+                else:
+                    failed_files.append(f"{file_path.name}: 文档未找到")
+                    print(f"❌ 文档未找到: {file_path.name}")
+            except Exception as e:
+                failed_files.append(f"{file_path.name}: 无法验证索引状态")
+                print(f"❌ 无法验证索引状态: {e}")
                     
             except Exception as e:
                 failed_files.append(f"{file_path.name}: 验证失败 - {str(e)}")

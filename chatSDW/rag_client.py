@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv("config.env")
 
 class MiniRAGClient:
-    """MiniRAG API 客户端类"""
+    """MiniRAG API 异步客户端类"""
     
     def __init__(self, base_url: str = None, api_key: Optional[str] = None):
         # 完全从config.env读取配置
@@ -34,16 +34,19 @@ class MiniRAGClient:
         self.api_key = api_key or os.getenv("LIGHTRAG_API_KEY")
         self.session = None
         self.logger = logging.getLogger(__name__)
-        
+    
     async def __aenter__(self):
+        """异步上下文管理器入口"""
         self.session = aiohttp.ClientSession()
         return self
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器出口"""
         if self.session:
             await self.session.close()
     
     def _get_headers(self) -> Dict[str, str]:
+        """获取请求头"""
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-API-Key"] = self.api_key
@@ -63,6 +66,219 @@ class MiniRAGClient:
         except Exception as e:
             self.logger.error(f"健康检查失败: {e}")
             return {"status": "error", "message": str(e)}
+    
+    async def query(self, question: str, mode: str = "mini") -> Dict[str, Any]:
+        """查询RAG系统"""
+        try:
+            url = f"{self.base_url}/query"
+            payload = {
+                "query": question,
+                "mode": mode,
+                "stream": False,
+                "only_need_context": False
+            }
+            
+            async with self.session.post(url, json=payload, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"查询失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def query_stream(self, question: str, mode: str = "mini") -> Dict[str, Any]:
+        """流式查询RAG系统"""
+        try:
+            url = f"{self.base_url}/query/stream"
+            payload = {
+                "query": question,
+                "mode": mode,
+                "stream": True,
+                "only_need_context": False
+            }
+            
+            async with self.session.post(url, json=payload, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"流式查询失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def documents_text(self, text: str, description: str = "") -> Dict[str, Any]:
+        """插入文本到RAG系统"""
+        try:
+            url = f"{self.base_url}/documents/text"
+            payload = {"text": text, "description": description}
+            
+            async with self.session.post(url, json=payload, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"文本插入失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def documents_file(self, file_path: Union[str, Path], description: str = "") -> Dict[str, Any]:
+        """插入文件到RAG系统"""
+        try:
+            file_path = Path(file_path)
+            if not file_path.exists():
+                return {"status": "error", "message": f"文件不存在: {file_path}"}
+            
+            url = f"{self.base_url}/documents/file"
+            
+            # 使用异步方式读取文件
+            file_content = await asyncio.get_event_loop().run_in_executor(
+                None, 
+                lambda: open(file_path, 'rb').read()
+            )
+            
+            # 准备multipart数据
+            data = aiohttp.FormData()
+            data.add_field('file', file_content, filename=file_path.name, content_type='application/octet-stream')
+            if description:
+                data.add_field('description', description)
+            
+            # 添加API密钥头
+            headers = {}
+            if self.api_key:
+                headers["X-API-Key"] = self.api_key
+            
+            async with self.session.post(url, data=data, headers=headers) as response:
+                return await response.json()
+                
+        except Exception as e:
+            self.logger.error(f"文件插入失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def documents_batch(self, files: List[Union[str, Path]]) -> Dict[str, Any]:
+        """批量插入文件"""
+        try:
+            url = f"{self.base_url}/documents/batch"
+            
+            # 准备multipart数据
+            data = aiohttp.FormData()
+            for file_path in files:
+                file_path = Path(file_path)
+                if file_path.exists():
+                    file_content = await asyncio.get_event_loop().run_in_executor(
+                        None, 
+                        lambda: open(file_path, 'rb').read()
+                    )
+                    data.add_field('files', file_content, filename=file_path.name, content_type='application/octet-stream')
+            
+            # 添加API密钥头
+            headers = {}
+            if self.api_key:
+                headers["X-API-Key"] = self.api_key
+            
+            async with self.session.post(url, data=data, headers=headers) as response:
+                return await response.json()
+                
+        except Exception as e:
+            self.logger.error(f"批量文件插入失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def documents_scan(self) -> Dict[str, Any]:
+        """扫描并索引新文档"""
+        try:
+            url = f"{self.base_url}/documents/scan"
+            async with self.session.post(url, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"文档扫描失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def documents_scan_progress(self) -> Dict[str, Any]:
+        """获取文档扫描进度"""
+        try:
+            url = f"{self.base_url}/documents/scan/progress"
+            async with self.session.get(url, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"获取扫描进度失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def documents_upload(self, file_path: Union[str, Path]) -> Dict[str, Any]:
+        """上传文档（简化版本）"""
+        try:
+            return await self.documents_file(file_path)
+        except Exception as e:
+            self.logger.error(f"文档上传失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def documents(self) -> Dict[str, Any]:
+        """获取已索引的文档列表"""
+        try:
+            url = f"{self.base_url}/documents"
+            async with self.session.get(url, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"获取文档列表失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def documents_delete(self) -> Dict[str, Any]:
+        """清空所有文档"""
+        try:
+            url = f"{self.base_url}/documents"
+            async with self.session.delete(url, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"清空文档失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def files_status(self) -> Dict[str, Any]:
+        """获取文件处理状态"""
+        try:
+            url = f"{self.base_url}/files/status"
+            async with self.session.get(url, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"获取文件状态失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def system_info(self) -> Dict[str, Any]:
+        """获取系统信息"""
+        try:
+            url = f"{self.base_url}/system/info"
+            async with self.session.get(url, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"获取系统信息失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def graph_label_list(self) -> Dict[str, Any]:
+        """获取图形标签列表"""
+        try:
+            url = f"{self.base_url}/graph/label/list"
+            async with self.session.get(url, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"获取图形标签失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def graphs(self, label: str, max_depth: int = 100) -> Dict[str, Any]:
+        """获取图形"""
+        try:
+            url = f"{self.base_url}/graphs"
+            params = {'label': label, 'max_depth': max_depth}
+            async with self.session.get(url, params=params, headers=self._get_headers()) as response:
+                return await response.json()
+        except Exception as e:
+            self.logger.error(f"获取图形失败: {e}")
+            return {"status": "error", "message": str(e)}
+
+
+class MiniRAGClientSync:
+    """MiniRAG API 同步客户端类"""
+    
+    def __init__(self, base_url: str = None, api_key: Optional[str] = None):
+        # 完全从config.env读取配置
+        if base_url is None:
+            host = os.getenv("HOST")
+            port = os.getenv("PORT")
+            if not host or not port:
+                raise ValueError("HOST和PORT必须在config.env中配置")
+            base_url = f"http://{host}:{port}"
+        
+        self.base_url = base_url.rstrip('/')
+        self.api_key = api_key or os.getenv("LIGHTRAG_API_KEY")
+        self.logger = logging.getLogger(__name__)
     
     async def query(self, question: str, mode: str = "mini") -> Dict[str, Any]:
         """查询RAG系统"""
@@ -504,3 +720,144 @@ class MiniRAGClient:
     async def clear_documents(self) -> Dict[str, Any]:
         """清空所有文档（别名：documents_delete）"""
         return await self.documents_delete()
+
+    def _get_headers(self) -> Dict[str, str]:
+        """获取请求头"""
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        return headers
+    
+    def health_check(self) -> Dict[str, Any]:
+        """检查服务器健康状态（同步版本）"""
+        try:
+            response = requests.get(f"{self.base_url}/health", headers=self._get_headers())
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"status": "error", "message": f"HTTP {response.status_code}"}
+        except Exception as e:
+            self.logger.error(f"健康检查失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def query(self, question: str, mode: str = "mini") -> Dict[str, Any]:
+        """查询RAG系统（同步版本）"""
+        try:
+            url = f"{self.base_url}/query"
+            payload = {
+                "query": question,
+                "mode": mode,
+                "stream": False,
+                "only_need_context": False
+            }
+            
+            response = requests.post(url, json=payload, headers=self._get_headers())
+            return response.json()
+        except Exception as e:
+            self.logger.error(f"查询失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def documents(self) -> List[str]:
+        """获取已索引的文档列表（同步版本）"""
+        try:
+            response = requests.get(f"{self.base_url}/documents", headers=self._get_headers())
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and "documents" in data:
+                    documents = data["documents"]
+                    # 如果documents是空列表但有其他数据，尝试从健康检查获取
+                    if not documents and data.get("storage_info", {}).get("full_docs_count", 0) > 0:
+                        # 从健康检查获取文件列表
+                        health_response = requests.get(f"{self.base_url}/health", headers=self._get_headers())
+                        if health_response.status_code == 200:
+                            health_data = health_response.json()
+                            indexed_files = health_data.get("indexed_files", [])
+                            return [Path(f).name for f in indexed_files]
+                    return [doc.get("id", "") for doc in documents if doc.get("id")]
+                elif isinstance(data, list):
+                    return data
+                else:
+                    return []
+            else:
+                return []
+        except Exception as e:
+            self.logger.error(f"获取文档列表失败: {e}")
+            return []
+    
+    def documents_file(self, file_path: Union[str, Path], description: str = "") -> Dict[str, Any]:
+        """上传并索引文档（同步版本）"""
+        try:
+            url = f"{self.base_url}/documents/file"
+            
+            with open(file_path, 'rb') as f:
+                files = {'file': (Path(file_path).name, f, 'application/octet-stream')}
+                data = {'description': description} if description else {}
+                
+                response = requests.post(url, files=files, data=data, headers={"X-API-Key": self.api_key} if self.api_key else {})
+                return response.json()
+        except Exception as e:
+            self.logger.error(f"上传文档失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def documents_text(self, text: str, description: str = "") -> Dict[str, Any]:
+        """插入文本到RAG系统（同步版本）"""
+        try:
+            url = f"{self.base_url}/documents/text"
+            payload = {
+                "text": text,
+                "description": description
+            }
+            
+            response = requests.post(url, json=payload, headers=self._get_headers())
+            return response.json()
+        except Exception as e:
+            self.logger.error(f"插入文本失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def documents_scan(self) -> Dict[str, Any]:
+        """扫描并索引新文档（同步版本）"""
+        try:
+            response = requests.post(f"{self.base_url}/documents/scan", headers=self._get_headers())
+            return response.json()
+        except Exception as e:
+            self.logger.error(f"扫描文档失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def documents_delete(self) -> Dict[str, Any]:
+        """清空所有文档（同步版本）"""
+        try:
+            response = requests.delete(f"{self.base_url}/documents", headers=self._get_headers())
+            return response.json()
+        except Exception as e:
+            self.logger.error(f"清空文档失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def files_status(self) -> Dict[str, Any]:
+        """获取文件处理状态（同步版本）"""
+        try:
+            response = requests.get(f"{self.base_url}/files/status", headers=self._get_headers())
+            return response.json()
+        except Exception as e:
+            self.logger.error(f"获取文件状态失败: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    # 为了向后兼容，保留一些别名方法
+    def get_documents(self) -> List[str]:
+        """获取已索引的文档列表（别名：documents）"""
+        return self.documents()
+    
+    def upload_document(self, file_path: Union[str, Path], description: str = "") -> Dict[str, Any]:
+        """上传并索引文档（别名：documents_file）"""
+        return self.documents_file(file_path, description)
+    
+    def insert_text(self, text: str, description: str = "") -> Dict[str, Any]:
+        """插入文本到RAG系统（别名：documents_text）"""
+        return self.documents_text(text, description)
+    
+    def scan_documents(self) -> Dict[str, Any]:
+        """扫描并索引新文档（别名：documents_scan）"""
+        return self.documents_scan()
+    
+    def clear_documents(self) -> Dict[str, Any]:
+        """清空所有文档（别名：documents_delete）"""
+        return self.documents_delete()

@@ -307,9 +307,7 @@ async def extract_entities_parallel(
             llm_duration = llm_end_time - llm_start_time
             print(f"✅ 任务 {task_id} LLM调用完成，耗时: {llm_duration:.2f}s")
             
-            # 如果LLM调用时间过长，发出警告
-            if llm_duration > 30:
-                print(f"⚠️ 警告: 任务 {task_id} LLM调用时间过长: {llm_duration:.2f}s")
+            # 移除单独的警告，将执行时间整合到任务完成日志中
                 
         except asyncio.TimeoutError:
             print(f"❌ 任务 {task_id} LLM调用超时，跳过此任务")
@@ -379,7 +377,7 @@ async def extract_entities_parallel(
             flush=True,
         )
         
-        print(f"🎯 任务 {task_id} 完成，提取了 {len(maybe_nodes)} 个实体和 {len(maybe_edges)} 个关系")
+        print(f"🎯 任务 {task_id} 完成，提取了 {len(maybe_nodes)} 个实体和 {len(maybe_edges)} 个关系 (LLM耗时: {llm_duration:.2f}s)")
         
         return dict(maybe_nodes), dict(maybe_edges)
     

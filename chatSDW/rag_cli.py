@@ -7,12 +7,57 @@ MiniRAG 终端问答CLI程序
 import os
 import sys
 import argparse
+import time
+import threading
 from pathlib import Path
 from typing import Optional
 import logging
 from dotenv import load_dotenv
+import readline  # 添加readline支持，改善输入体验
+
+# 尝试导入prompt_toolkit，如果可用则使用更好的输入体验
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import WordCompleter
+    from prompt_toolkit.styles import Style
+    PROMPT_TOOLKIT_AVAILABLE = True
+except ImportError:
+    PROMPT_TOOLKIT_AVAILABLE = False
 
 from rag_client import MiniRAGClientSync
+
+
+class Spinner:
+    """旋转动画类"""
+    def __init__(self, message="处理中"):
+        self.message = message
+        self.spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.spinner_index = 0
+        self.running = False
+        self.thread = None
+    
+    def start(self):
+        """开始旋转动画"""
+        self.running = True
+        self.thread = threading.Thread(target=self._spin)
+        self.thread.daemon = True
+        self.thread.start()
+    
+    def stop(self):
+        """停止旋转动画"""
+        self.running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.1)
+        # 清除当前行
+        print('\r' + ' ' * (len(self.message) + 10) + '\r', end='', flush=True)
+    
+    def _spin(self):
+        """旋转动画线程"""
+        while self.running:
+            spinner_char = self.spinner_chars[self.spinner_index]
+            print(f'\r{spinner_char} {self.message}', end='', flush=True)
+            time.sleep(0.1)
+            self.spinner_index = (self.spinner_index + 1) % len(self.spinner_chars)
 
 # 加载环境变量
 # 从项目根目录加载config.env
@@ -29,6 +74,32 @@ class RAGCLI:
     """MiniRAG 终端问答CLI类"""
     
     def __init__(self, server_url: str = None, api_key: Optional[str] = None):
+        # 初始化readline，改善输入体验
+        try:
+            readline.parse_and_bind('tab: complete')
+            readline.parse_and_bind('set editing-mode emacs')
+        except Exception:
+            # 如果readline不可用，继续使用标准输入
+            pass
+        
+        # 初始化prompt_toolkit（如果可用）
+        if PROMPT_TOOLKIT_AVAILABLE:
+            try:
+                # 创建命令补全器
+                commands = ['/help', '/health', '/docs', '/scan', '/upload', '/insert', '/clear', '/quit', '/exit']
+                self.completer = WordCompleter(commands, ignore_case=True)
+                
+                # 创建提示会话
+                self.prompt_session = PromptSession(
+                    completer=self.completer,
+                    style=Style.from_dict({
+                        'prompt': 'ansicyan bold',
+                    })
+                )
+            except Exception:
+                self.prompt_session = None
+        else:
+            self.prompt_session = None
         # 完全从config.env读取配置
         if server_url is None:
             host = os.getenv("HOST")
@@ -166,24 +237,57 @@ class RAGCLI:
         if len(self.conversation_history) > self.max_history:
             self.conversation_history.pop(0)
     
+    def get_user_input(self, prompt: str) -> str:
+        """获取用户输入，处理字符删除问题"""
+        try:
+            # 优先使用prompt_toolkit（如果可用）
+            if self.prompt_session:
+                user_input = self.prompt_session.prompt(prompt)
+            else:
+                # 回退到标准input()
+                user_input = input(prompt)
+            
+            # 处理可能的编码问题
+            if isinstance(user_input, bytes):
+                user_input = user_input.decode('utf-8', errors='ignore')
+            
+            # 清理输入
+            user_input = user_input.strip()
+            
+            return user_input
+        except UnicodeDecodeError:
+            # 如果出现编码错误，尝试重新输入
+            print("⚠️ 输入编码错误，请重新输入")
+            return self.get_user_input(prompt)
+        except Exception as e:
+            print(f"⚠️ 输入错误: {e}")
+            return ""
+    
     def query_rag(self, question: str, mode: str = "mini") -> str:
         """查询RAG系统"""
         try:
-            print(f"🤖 正在查询 (模式: {mode})...")
+            # 创建并启动旋转动画
+            spinner = Spinner("正在查询中...")
+            spinner.start()
+            
+            # 执行查询
             result = self.client.query(question, mode)
+            
+            # 停止旋转动画
+            spinner.stop()
             
             if "response" in result:
                 answer = result["response"]
-                print(f"✅ 查询完成")
                 return answer
             else:
                 error_msg = result.get("message", "未知错误")
-                print(f"❌ 查询失败: {error_msg}")
                 return f"查询失败: {error_msg}"
                 
         except Exception as e:
+            # 确保在异常情况下也停止旋转动画
+            if 'spinner' in locals():
+                spinner.stop()
             error_msg = f"查询异常: {e}"
-            print(f"❌ {error_msg}")
             return error_msg
     
     def process_command(self, command: str) -> bool:
@@ -248,7 +352,7 @@ class RAGCLI:
         
         while True:
             try:
-                user_input = input(f"\n💭 [{current_mode}] 请输入问题或命令: ").strip()
+                user_input = self.get_user_input(f"\n💭 [{current_mode}] 输入: ")
                 
                 if not user_input:
                     continue
@@ -258,18 +362,15 @@ class RAGCLI:
                         break
                     continue
                 
-                print(f"\n🔍 问题: {user_input}")
-                print("-" * 50)
-                
                 answer = self.query_rag(user_input, current_mode)
                 
                 if answer and not answer.startswith("查询失败"):
-                    print(f"\n💡 回答: {answer}")
+
+
+                    print(f"\n\033[34m💡 [{current_mode}] 回答:\033[0m {answer}")  # 蓝色标签，正常内容
                     self.add_to_history(user_input, answer)
                 else:
-                    print(f"\n❌ {answer}")
-                
-                print("-" * 50)
+                    print(f"\n\033[31m❌\033[0m {answer}")  # 红色图标，正常内容
                 
             except KeyboardInterrupt:
                 print("\n\n👋 程序被中断，再见！")

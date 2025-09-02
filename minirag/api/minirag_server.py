@@ -749,6 +749,10 @@ def create_app(args):
     logging.basicConfig(
         format="%(levelname)s:%(message)s", level=getattr(logging, args.log_level)
     )
+    
+    # 减少FastAPI的访问日志，只记录错误
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.setLevel(logging.WARNING)
 
     # Check if API key is provided either through env var or args
     api_key = os.getenv("LIGHTRAG_API_KEY") or args.key
@@ -1897,28 +1901,28 @@ def create_app(args):
             doc_status_data = {}
             if rag.doc_status:
                 try:
-                    doc_status_data = rag.doc_status.all_keys()
+                    doc_status_data = await rag.doc_status.all_keys()
                 except Exception as e:
                     logging.warning(f"获取文档状态失败: {e}")
             
             full_docs_data = {}
             if rag.full_docs:
                 try:
-                    full_docs_data = rag.full_docs.all_keys()
+                    full_docs_data = await rag.full_docs.all_keys()
                 except Exception as e:
                     logging.warning(f"获取完整文档失败: {e}")
             
             text_chunks_data = {}
             if rag.text_chunks:
                 try:
-                    text_chunks_data = rag.text_chunks.all_keys()
+                    text_chunks_data = await rag.text_chunks.all_keys()
                 except Exception as e:
                     logging.warning(f"获取文本块失败: {e}")
             
             documents = []
             for doc_id in doc_status_data:
                 try:
-                    doc_status = rag.doc_status.get(doc_id)
+                    doc_status = await rag.doc_status.get(doc_id)
                     if doc_status and doc_status.get("status") == "PROCESSED":
                         doc_info = {
                             "id": doc_id,
@@ -1934,7 +1938,7 @@ def create_app(args):
                         # 获取完整文档内容
                         if doc_id in full_docs_data:
                             try:
-                                full_doc = rag.full_docs.get(doc_id)
+                                full_doc = await rag.full_docs.get(doc_id)
                                 if full_doc:
                                     doc_info["content"] = full_doc.get("content", "")
                             except Exception as e:
