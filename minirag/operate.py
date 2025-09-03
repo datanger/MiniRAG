@@ -1533,6 +1533,8 @@ async def _build_mini_query_context(
     imp_ents = []
     nodes_from_query_list = []
     ent_from_query_dict = {}
+    # 修复当 ent_from_query 为空时 results_node 未定义导致的 UnboundLocalError
+    results_node = []
 
     for ent in ent_from_query:
         ent_from_query_dict[ent] = []

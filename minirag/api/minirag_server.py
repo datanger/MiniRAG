@@ -611,6 +611,24 @@ class OllamaChatRequest(BaseModel):
     system: Optional[str] = None
 
 
+# OpenAI Chat Completions 兼容请求体（用于 /v1/chat/completions → RAG 查询）
+class OpenAIChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class OpenAIChatRequest(BaseModel):
+    model: str = ollama_server_infos.LIGHTRAG_MODEL
+    messages: List[OpenAIChatMessage]
+    stream: bool = False
+    # 允许非标准但向后兼容的扩展字段：mode（light/naive/mini），用于选择RAG模式
+    mode: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+
+
 class OllamaChatResponse(BaseModel):
     model: str
     created_at: str
@@ -1889,6 +1907,159 @@ def create_app(args):
                     "eval_count": completion_tokens,
                     "eval_duration": eval_time,
                 }
+        except Exception as e:
+            trace_exception(e)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # OpenAI 兼容：/v1/chat/completions → 映射到 MiniRAG RAG 查询
+    @app.post("/v1/chat/completions")
+    async def openai_chat_completions(request: OpenAIChatRequest):
+        """OpenAI Chat Completions 兼容端点（用于 RAG 查询）
+        - 使用最后一条 user 消息作为查询；其余作为历史对话
+        - 支持可选字段 mode（light/naive/mini），或通过消息前缀 /light /naive /mini 自动解析
+        - 支持 stream: True 以 SSE 方式输出（data: ...\n\n）
+        返回结构尽量贴合 OpenAI Chat Completions：
+        {
+          "id": "chatcmpl-...",
+          "object": "chat.completion",
+          "model": "...",
+          "choices": [{"index": 0, "message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}],
+          "usage": {"prompt_tokens": x, "completion_tokens": y, "total_tokens": x+y}
+        }
+        """
+        try:
+            # 基本参数与消息
+            messages = request.messages or []
+            if not messages:
+                raise HTTPException(status_code=400, detail="messages 不能为空")
+
+            last_msg = messages[-1]
+            query_text = last_msg.content
+            history = [{"role": m.role, "content": m.content} for m in messages[:-1]]
+
+            # 解析模式：优先 request.mode，然后解析前缀（本地实现，避免依赖可能缺失的 hybrid 枚举）
+            if request.mode in ("light", "naive", "mini"):
+                mode = SearchMode(request.mode)
+            else:
+                prefix_map = {
+                    "/light ": SearchMode.light,
+                    "/naive ": SearchMode.naive,
+                    "/mini ": SearchMode.mini,
+                }
+                mode = SearchMode.mini
+                for prefix, m in prefix_map.items():
+                    if query_text.startswith(prefix):
+                        query_text = query_text[len(prefix):].lstrip()
+                        mode = m
+                        break
+
+            # 估算 tokens（粗略）
+            prompt_tokens = estimate_tokens(query_text)
+
+            # 组装 QueryParam
+            qp = QueryParam(
+                mode=mode,
+                stream=request.stream,
+                only_need_context=False,
+                conversation_history=history,
+                top_k=args.top_k,
+                history_turns=args.history_turns if args.history_turns is not None else None,
+            )
+
+            if request.stream:
+                from fastapi.responses import StreamingResponse
+                import uuid
+
+                async def sse_stream():
+                    total_text = ""
+                    # 使用 MiniRAG aquery 获取异步生成器或直接字符串
+                    resp = await rag.aquery(query_text, param=qp)
+                    created = int(time.time())
+                    model_name = request.model
+                    cmpl_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+
+                    def format_delta(content_chunk: str):
+                        data = {
+                            "id": cmpl_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_name,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": content_chunk},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+                    if isinstance(resp, str):
+                        total_text = resp
+                        yield format_delta(resp)
+                    else:
+                        async for chunk in resp:
+                            if not chunk:
+                                continue
+                            total_text += chunk
+                            yield format_delta(chunk)
+
+                    # 结束包
+                    usage = {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": estimate_tokens(total_text),
+                        "total_tokens": prompt_tokens + estimate_tokens(total_text),
+                    }
+                    done_data = {
+                        "id": cmpl_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_name,
+                        "choices": [
+                            {"index": 0, "delta": {}, "finish_reason": "stop"}
+                        ],
+                        "usage": usage,
+                    }
+                    yield f"data: {json.dumps(done_data, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(sse_stream(), media_type="text/event-stream", headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Access-Control-Allow-Origin": "*",
+                })
+            else:
+                # 非流式一次性返回
+                resp = await rag.aquery(query_text, param=qp)
+                if not isinstance(resp, str):
+                    text = ""
+                    async for chunk in resp:
+                        text += chunk
+                else:
+                    text = resp
+
+                completion_tokens = estimate_tokens(text)
+                usage = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                }
+
+                return {
+                    "id": f"chatcmpl-{int(time.time()*1000)}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": text},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": usage,
+                }
+
         except Exception as e:
             trace_exception(e)
             raise HTTPException(status_code=500, detail=str(e))
